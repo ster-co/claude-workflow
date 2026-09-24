@@ -11,16 +11,32 @@ const fs = require('fs');
 const path = require('path');
 const { markerPath, readStdin } = require('./gate-lib.cjs');
 
-const SATISFYING = new Set([
-  'mcp__serena__find_referencing_symbols',
-  'mcp__serena__find_implementations',
-  'mcp__serena__find_declaration',
+const SATISFYING_TOOLS = new Set([
+  'find_referencing_symbols',
+  'find_implementations',
+  'find_declaration',
 ]);
+
+// A user-level Serena is called as mcp__serena__<tool>. A plugin-provided one is
+// renamed by Claude Code to mcp__plugin_<plugin-name>_<server-name>__<tool>,
+// giving names like mcp__plugin_workflow-discipline_serena__find_referencing_symbols
+// — the plugin name is not ours to assume, so this only checks that the server
+// segment ends in "serena". Matching is done on the segment before the FINAL
+// "__" (the tool name never contains "__" itself) rather than a fixed prefix
+// list, so both naming forms are accepted without hardcoding any plugin's name.
+function satisfies(toolName) {
+  const i = toolName.lastIndexOf('__');
+  if (i === -1) return false;
+  const server = toolName.slice(0, i);
+  const tool = toolName.slice(i + 2);
+  if (!SATISFYING_TOOLS.has(tool)) return false;
+  return server === 'mcp__serena' || (server.startsWith('mcp__plugin_') && server.endsWith('_serena'));
+}
 
 readStdin((input) => {
   const session = input?.session_id;
   if (!session) process.exit(0);
-  if (!SATISFYING.has(input?.tool_name || '')) process.exit(0);
+  if (!satisfies(input?.tool_name || '')) process.exit(0);
 
   const m = markerPath('refs-checked', session);
   try {

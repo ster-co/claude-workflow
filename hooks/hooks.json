@@ -73,7 +73,7 @@
         ]
       },
       {
-        "matcher": "mcp__serena__find_referencing_symbols|mcp__serena__find_implementations|mcp__serena__find_declaration",
+        "matcher": "mcp__(plugin_.+_)?serena__(find_referencing_symbols|find_implementations|find_declaration)",
         "hooks": [
           {
             "type": "command",

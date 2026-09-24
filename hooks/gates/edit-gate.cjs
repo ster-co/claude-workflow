@@ -30,9 +30,11 @@ function reason(targets, root) {
   const names = [...new Set(targets.map((t) => path.basename(t)))].slice(0, 5).join(', ');
   return (
     `No reference lookup has been run this turn, and ${names} lives in ${path.basename(root)}. ` +
-    `Find out what depends on the symbol you are about to change — ` +
-    `mcp__serena__find_referencing_symbols({name_path: "<symbol>", relative_path: "<file>"}) — ` +
-    `report what it returns, then retry. ` +
+    `Find out what depends on the symbol you are about to change — call Serena's ` +
+    `"find referencing symbols" tool ({name_path: "<symbol>", relative_path: "<file>"}) — ` +
+    `report what it returns, then retry. Under a plugin install the tool name is ` +
+    `namespaced (mcp__plugin_<plugin-name>_serena__find_referencing_symbols, not ` +
+    `mcp__serena__find_referencing_symbols); look for whichever variant is available. ` +
     `No tool resolves a string reference (getattr, a scheduler registry, monkeypatch.setattr), ` +
     `so where one is plausible confirm with a grep as well: "no callers found" is not proof.`
   );

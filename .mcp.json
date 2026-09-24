@@ -1,10 +1,10 @@
 {
-  "//": "Serena gives code-intelligence tools (find_referencing_symbols, find_implementations, find_declaration) that the edit gate requires before touching a gated repo. Requires `uvx` on PATH — this file ships the config, not the uv/uvx binary itself.",
+  "//": "Serena gives code-intelligence tools (find_referencing_symbols, find_implementations, find_declaration) that the edit gate requires before touching a gated repo. Requires `uvx` on PATH — this file ships the config, not the uv/uvx binary itself. The dashboard stays enabled (Serena's own --help recommends always enabling it) but --open-web-dashboard False stops it from popping a browser tab on every session start.",
   "mcpServers": {
     "serena": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--project-from-cwd"],
+      "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--project-from-cwd", "--open-web-dashboard", "False"],
       "env": {}
     }
   }

@@ -308,6 +308,38 @@ rm(refsMarker);
 run('gates/refs-record.cjs', post('Read'));
 check('an unrelated tool writes nothing', fs.existsSync(refsMarker), false);
 
+// A plugin-provided MCP server is namespaced: Claude Code renames its tools to
+// mcp__plugin_<plugin-name>_<server-name>__<tool>, not mcp__<server-name>__<tool>.
+// A colleague who installs Serena as a plugin therefore calls
+// mcp__plugin_<their-plugin-name>_serena__find_referencing_symbols, never the bare
+// form, and the marker must still be written — otherwise the edit gate is
+// unsatisfiable under a plugin install.
+rm(refsMarker);
+run('gates/refs-record.cjs', post('mcp__plugin_workflow-discipline_serena__find_referencing_symbols'));
+check('a plugin-namespaced reference lookup writes the marker', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+run('gates/refs-record.cjs', post('mcp__plugin_workflow-discipline_serena__find_implementations'));
+check('a plugin-namespaced find_implementations writes the marker', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+run('gates/refs-record.cjs', post('mcp__plugin_workflow-discipline_serena__find_declaration'));
+check('a plugin-namespaced find_declaration writes the marker', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+// find_symbol locates a definition and says nothing about callers, so it must
+// stay excluded from the gate in both naming forms.
+run('gates/refs-record.cjs', post('mcp__serena__find_symbol'));
+check('the bare form of find_symbol does NOT satisfy the gate', fs.existsSync(refsMarker), false);
+rm(refsMarker);
+run('gates/refs-record.cjs', post('mcp__plugin_workflow-discipline_serena__find_symbol'));
+check('the plugin-namespaced form of find_symbol does NOT satisfy the gate', fs.existsSync(refsMarker), false);
+rm(refsMarker);
+
+// End to end: a plugin-namespaced lookup must also satisfy edit-gate.cjs, not
+// just write a marker refs-record.cjs happens to check for itself.
+run('gates/refs-record.cjs', post('mcp__plugin_workflow-discipline_serena__find_referencing_symbols'));
+check('after a plugin-namespaced lookup, edit-gate then allows the edit',
+  decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: path.join(REPO, 'src/thing.py') }))), 'allow');
+rm(refsMarker);
+
 console.log('\ndiff-record.cjs — records that the diff was actually read');
 rm(diffMarker);
 const ranDiff = (cmd) => {
