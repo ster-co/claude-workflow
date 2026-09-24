@@ -31,6 +31,34 @@ runs it and reports back.
 | `uv` (`uvx`) | starts Serena, the MCP server the edit/commit gates depend on | `.mcp.json`'s comment: *"Requires `uvx` on PATH — this file ships the config, not the uv/uvx binary itself."* |
 | `gh` | `commands/land.md` step 8 says "Open a PR" but never names a tool — opening a PR from the CLI is Claude Code's own convention for GitHub work, and there is nothing else installed here that can do it | inferred, not quoted — `land.md` itself is silent on the mechanism |
 
+**If any of those four is missing.** `node` normally arrives with Claude Code and `git` is
+usually already there, so `gh` is the one most likely to be absent. Check all four first —
+`node --version`, `git --version`, `uvx --version`, `gh --version` — and install only what
+is missing:
+
+```
+# Windows (winget ships with Windows 10/11)
+winget install OpenJS.NodeJS
+winget install Git.Git
+winget install GitHub.cli
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS (Homebrew)
+brew install node git gh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Debian/Ubuntu
+sudo apt install -y nodejs git
+# gh needs its own repository: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Open a new terminal afterwards — an installer that edits `PATH` does not change the shell
+you ran it from, and a `uvx` that is installed but not yet on `PATH` fails exactly the same
+way as one that is not installed at all (step 5d).
+
+`gh` also needs authenticating once before `/land` can open a pull request: `gh auth login`.
+
 **Windows only, and unverified:** Serena's Roslyn language server (used for C#) is
 *believed* to need PowerShell 7+ (`pwsh`) rather than the Windows PowerShell 5.1 that
 ships with the OS. This comes from Serena's own docs, not from anything tested in this
