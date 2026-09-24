@@ -45,7 +45,7 @@ you work in C#.
 "dependencies": [{ "name": "superpowers", "marketplace": "claude-plugins-official" }]
 ```
 
-— quoted verbatim from that file. A single `/plugin install workflow-discipline@ster-co`
+— quoted verbatim from that file. A single `/plugin install workflow-discipline@klosoter-workflow`
 pulls both. Four of `superpowers`' skills are what the commands actually call by name:
 `brainstorming` (`commands/plan.md`, `commands/ship.md`, `commands/brainstorm.md`),
 `systematic-debugging` (`commands/bug.md`), `writing-plans` (`commands/plan.md`,
@@ -56,23 +56,45 @@ check `/plugin` for it before looking anywhere else.
 **Six more plugins are installed on this machine and are *not* declared dependencies:**
 `pyright-lsp`, `typescript-lsp`, `playwright`, `azure`, `microsoft-docs`, `frontend-design`.
 Checked directly — `grep -rn "mcp__" commands/ agents/ skills/workflow-discipline
-skills/refactor` finds only `mcp__serena__*` names, nowhere else. None of these six is
-referenced by any command, agent, or the `workflow-discipline`/`refactor` skills. They are
-this operator's own toolset for particular kinds of work, not something `/ship`, `/plan`,
-`/execute`, `/brief`, or `/land` needs to run:
+skills/refactor` finds only `mcp__serena__*` names, nowhere else, so none of the six is
+wired into `/ship`, `/plan`, `/execute`, `/brief`, or `/land`: the core loop runs without
+them. That is a statement about what the *commands* call, not about whether the plugins are
+worth having — this is the rest of the working toolset, in regular day-to-day use on this
+machine, and a colleague who wants parity with the operator's own setup should take all six,
+not skip them as niche:
 
-- `pyright-lsp` / `typescript-lsp` — supplementary diagnostics for Python/JS/TS beyond what
-  Serena gives; Serena alone already satisfies the edit gate. Skip unless you want the
-  extra diagnostics.
-- `playwright` — for driving a real browser during UI work. Skip unless you do UI work.
-- `azure`, `microsoft-docs` — for Azure-specific work and checking Microsoft API docs
-  (`CLAUDE.md`: *"check the version the project actually pins... (Context7, microsoft-docs)"*).
-  Skip unless you work against Azure or Microsoft SDKs.
-- `frontend-design` — not referenced anywhere in this repository's commands, agents, or
-  skills. Skip unless you specifically want it.
+- `microsoft-docs` — ships the `microsoft-learn` MCP server (HTTP,
+  `https://learn.microsoft.com/api/mcp`) plus three skills
+  (`microsoft-code-reference`, `microsoft-docs`, `microsoft-skill-creator`). This is what
+  backs the "check current documentation" rule in `CLAUDE.md` directly, so treat it as
+  load-bearing rather than optional.
+- `azure` — ships an `azure` MCP server (`npx -y @azure/mcp@latest server start`) plus 28
+  skills covering AKS, App Service, Functions, Cosmos DB, storage, cost, diagnostics, and
+  more. Verified by counting the `skills/` subdirectories in the installed plugin cache.
+- `pyright-lsp` / `typescript-lsp` — language servers giving diagnostics beyond what Serena
+  provides for the gates; Serena alone already satisfies the edit gate, so these are extra
+  signal, not a requirement.
+- `playwright` — drives a real browser. `CLAUDE.md` has a rule for exactly this: *"For
+  anything with a UI, drive a real browser. A DOM assertion is not evidence."* That rule is
+  what this plugin backs, so it is load-bearing for UI work rather than a nice-to-have.
+- `frontend-design` — guidance for visual and taste-driven design work; not referenced by
+  any command, agent, or skill in this repository, but part of the operator's own toolset
+  for that kind of work.
 
-None of the six is required for the core `/ship` loop. Install them individually, later,
-only for the kind of work that needs them.
+A colleague who wants the whole toolset, not just the core loop, installs all six:
+
+```
+/plugin install microsoft-docs@claude-plugins-official
+/plugin install azure@claude-plugins-official
+/plugin install pyright-lsp@claude-plugins-official
+/plugin install typescript-lsp@claude-plugins-official
+/plugin install playwright@claude-plugins-official
+/plugin install frontend-design@claude-plugins-official
+```
+
+Or install individually, picking by what each gives you above — none of the six is required
+for `/ship` to run, but two of them (`microsoft-docs`, `playwright`) back rules `CLAUDE.md`
+states as musts.
 
 ### MCP servers
 
@@ -125,17 +147,17 @@ session starts with `uvx` reachable. This is proved in step 5, not asserted here
 ## Step 2 — install the plugin
 
 ```
-/plugin marketplace add ster-co/claude-workflow
-/plugin install workflow-discipline@ster-co
+/plugin marketplace add <org>/<repo>
+/plugin install workflow-discipline@klosoter-workflow
 ```
 
-The plugin name `workflow-discipline` and marketplace name `ster-co` are quoted
+The plugin name `workflow-discipline` and marketplace name `klosoter-workflow` are quoted
 verbatim from `.claude-plugin/plugin.json` (`"name": "workflow-discipline"`) and
-`.claude-plugin/marketplace.json` (`"name": "ster-co"`) — read, not typed from
-memory. The repository is private to the `ster-co` organisation, so you need to be a member
-with read access for `/plugin marketplace add` to reach it.
+`.claude-plugin/marketplace.json` (`"name": "klosoter-workflow"`) — read, not typed from
+memory. `<org>/<repo>` is a placeholder: this repository is not published anywhere
+`/plugin marketplace add` can reach yet. Replace it with the real `owner/repo` once it is.
 
-**Check:** `/plugin` lists `workflow-discipline@ster-co` and
+**Check:** `/plugin` lists `workflow-discipline@klosoter-workflow` and
 `superpowers@claude-plugins-official` as installed — the second arrived automatically from
 step 2's dependency declaration, not from a separate command.
 
@@ -169,7 +191,16 @@ their full paths.)
   `"effortLevel": "high"`). It also carries this operator's own `enabledPlugins` list
   (the seven named above) — a colleague who has not installed all seven will simply not
   have those extras enabled; nothing in the core loop needs them, per the plugins section
-  above.
+  above. **It also registers a third-party marketplace**, not just this operator's own
+  plugin list — `settings.json`'s `extraKnownMarketplaces` points at
+  `github.com/microsoft/skills`. Copying the file adds that source to a colleague's
+  `/plugin marketplace` list, the same as the official one. Read directly from the cached
+  copy of that repository: it is Microsoft's own catalogue of skills, agents and MCP
+  configs for Azure SDKs and Microsoft AI Foundry (`azure-skills`, `azure-sdk-python`,
+  `azure-sdk-dotnet`, `deep-wiki`, and more — 175 skills at last count, per that repo's own
+  README). Registering the marketplace only makes its plugins installable; nothing from it
+  is in `enabledPlugins`, so nothing installs merely by copying this file — a colleague
+  would still run `/plugin install <name>@skills` to pull anything from it.
 - `CLAUDE.md` restores the discipline as **always-on** context — every turn, not only the
   turns where a command pulls it in. A plugin cannot ship this file as project context; that
   channel does not exist in the plugin system. The `workflow-discipline` skill is the

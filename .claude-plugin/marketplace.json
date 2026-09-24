@@ -1,13 +1,11 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "ster-co",
-  "description": "ster-co's plan-gated Claude Code workflow, packaged as an installable plugin.",
+  "name": "klosoter-workflow",
+  "description": "klosoter's plan-gated Claude Code workflow, packaged as an installable plugin.",
   "owner": {
-    "name": "ster-co"
+    "name": "klosoter"
   },
-  "allowCrossMarketplaceDependenciesOn": [
-    "claude-plugins-official"
-  ],
+  "allowCrossMarketplaceDependenciesOn": ["claude-plugins-official"],
   "plugins": [
     {
       "name": "workflow-discipline",

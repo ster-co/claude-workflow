@@ -34,7 +34,7 @@
 
 - Before writing a call against a library, framework, SDK, API or CLI, check the version
   the project actually pins, then confirm the signature against current documentation
-  (Context7, microsoft-docs) rather than from memory.
+  (microsoft-docs) rather than from memory.
 - Do not introduce an API, argument, configuration field or package behavior you have not
   seen in the docs for the version in use.
 
