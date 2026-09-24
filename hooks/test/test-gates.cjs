@@ -340,6 +340,50 @@ check('after a plugin-namespaced lookup, edit-gate then allows the edit',
   decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: path.join(REPO, 'src/thing.py') }))), 'allow');
 rm(refsMarker);
 
+// A lookup on a file with no symbols does not return empty — it throws, so
+// Claude Code fires PostToolUseFailure instead of PostToolUse and the marker
+// was never written at all. Measured live against a real Serena: the `error`
+// field on that event is a free-text string, e.g.
+// "Error executing tool find_referencing_symbols: ValueError: No symbol
+// matching 'X' found" for find_referencing_symbols/find_implementations, and
+// "...ValueError: No match found for regex: X" for find_declaration — no
+// separate error-code or error-type field exists to key on instead. "Nothing
+// depends on this" is as real an answer as a populated result list, so these
+// must satisfy the gate the same way a successful call does; a failure that
+// looks like anything else (a bad call, Serena being down) must not.
+const failPost = (tool, error, extra = {}) => ({
+  hook_event_name: 'PostToolUseFailure', tool_name: tool, tool_input: {}, session_id: SID, cwd: REPO, error, ...extra,
+});
+const NOTHING_FOUND = "Error executing tool find_referencing_symbols: ValueError: No symbol matching 'X' found";
+const NOTHING_FOUND_DECL = "Error executing tool find_declaration: ValueError: No match found for regex: X";
+const CONNECTION_ERROR = 'MCP error -32000: Connection closed';
+
+rm(refsMarker);
+run('gates/refs-record.cjs', failPost('mcp__serena__find_referencing_symbols', NOTHING_FOUND));
+check('a failed lookup that found nothing writes the marker (bare tool name)', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+run('gates/refs-record.cjs', failPost('mcp__plugin_workflow-discipline_serena__find_referencing_symbols', NOTHING_FOUND));
+check('a failed lookup that found nothing writes the marker (plugin-namespaced)', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+run('gates/refs-record.cjs', failPost('mcp__serena__find_declaration', NOTHING_FOUND_DECL));
+check('a failed find_declaration with no regex match writes the marker', fs.existsSync(refsMarker), true);
+rm(refsMarker);
+run('gates/refs-record.cjs', failPost('mcp__serena__find_referencing_symbols', CONNECTION_ERROR));
+check('a failure that is NOT a "nothing found" answer does NOT write the marker', fs.existsSync(refsMarker), false);
+rm(refsMarker);
+
+run('gates/refs-record.cjs', failPost('mcp__plugin_workflow-discipline_serena__find_referencing_symbols', NOTHING_FOUND));
+check('after a failed "nothing found" lookup, edit-gate then allows the edit',
+  decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: path.join(REPO, 'src/thing.py') }))), 'allow');
+const failMarkerBody = JSON.parse(fs.readFileSync(refsMarker, 'utf8'));
+check('the marker on a failed-but-empty lookup records that outcome', failMarkerBody.outcome, 'empty');
+rm(refsMarker);
+
+run('gates/refs-record.cjs', post('mcp__serena__find_referencing_symbols'));
+const okMarkerBody = JSON.parse(fs.readFileSync(refsMarker, 'utf8'));
+check('the marker on a successful lookup records that outcome', okMarkerBody.outcome, 'ok');
+rm(refsMarker);
+
 console.log('\ndiff-record.cjs — records that the diff was actually read');
 rm(diffMarker);
 const ranDiff = (cmd) => {
