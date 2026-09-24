@@ -92,14 +92,63 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
     /next session/i.test(context(res)), true);
 }
 
-// MUST NOT touch a repository that has already made its own choices.
+// yaml is a noisy extra in a repo that already has a real language — the
+// threshold guards against one stray .yml starting a server nobody asked for.
+{
+  const r = repo({ 'app/main.py': 'x = 1\n', 'cfg/a.yaml': 'a: 1\n', 'cfg/b.yaml': 'b: 1\n', 'cfg/c.yaml': 'c: 1\n' });
+  const res = start(r);
+  check('python only, not yaml, below the noisy-extra threshold', servers(r), ['python']);
+  check('and the session is told', /python/.test(context(res)), true);
+}
+
+// But a repo that is nothing but YAML is a YAML repo at any count, not just
+// at the >=10 threshold that exists to keep yaml out of a Python repo.
+{
+  const files = {};
+  for (let i = 0; i < 9; i++) files[`k8s/svc-${i}.yaml`] = `name: svc-${i}\n`;
+  const r = repo(files);
+  const res = start(r);
+  check('a yaml-only repo below 10 files still gets yaml', servers(r), ['yaml']);
+  check('and it is gated', /yaml/.test(context(res)), true);
+}
+
+// MUST NOT touch a repository that has already made its own choices, but a
+// detected language the file never mentions must still be surfaced so the
+// operator can add it themselves — the file itself stays byte-identical.
 {
   const r = repo({ 'app/main.py': 'x = 1\n' });
   fs.mkdirSync(path.join(r, '.serena'), { recursive: true });
-  fs.writeFileSync(yml(r), 'language_servers:\n- rust\n');
+  const before = 'language_servers:\n- rust\n';
+  fs.writeFileSync(yml(r), before);
   const res = start(r);
   check('an existing config is left exactly as it was', servers(r), ['rust']);
-  check('and nothing is reported', context(res), '');
+  check('byte-identical, not just the same servers list',
+    fs.readFileSync(yml(r), 'utf8'), before);
+  check('but the missing detected language is mentioned', /python/.test(context(res)), true);
+  check('and the existing choice is named too', /rust/.test(context(res)), true);
+}
+
+// Serena itself writes a commented template with no active language_servers
+// entries when it first opens a project. That is not a configuration choice
+// to preserve — it cannot serve a lookup — so the block gets written, the way
+// it would for a repo with no .serena/project.yml at all.
+{
+  const r = repo({ 'app/main.py': 'x = 1\n' });
+  fs.mkdirSync(path.join(r, '.serena'), { recursive: true });
+  const before = [
+    'project_name: "x"\n',
+    '\n',
+    '# language_servers:\n',
+    '#   - python\n',
+    '\n',
+    'ignore_all_files_in_gitignore: true\n',
+  ].join('');
+  fs.writeFileSync(yml(r), before);
+  const res = start(r);
+  check('a config with no usable entries gets the block written', servers(r), ['python']);
+  check('and the rest of the file is preserved',
+    fs.readFileSync(yml(r), 'utf8').includes('project_name: "x"'), true);
+  check('and the session is told', /python/.test(context(res)), true);
 }
 
 // MUST NOT write into a directory that is not a repository at all.
@@ -205,12 +254,14 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
     fs.existsSync(path.join(r, '.claude', 'settings.json')), false);
 }
 
-// A repository with nothing Serena supports gets nothing, silently.
+// A repository with nothing Serena supports gets nothing written, but silence
+// would leave the operator believing an ungated repo was protected, so it
+// must say so.
 {
   const r = repo({ 'README.md': '# docs only\n' });
   const res = start(r);
   check('a repo with no supported language is not configured', fs.existsSync(yml(r)), false);
-  check('and nothing is reported', context(res), '');
+  check('and the session is told it is not gated', /not gated/i.test(context(res)), true);
 }
 
 console.log('\nrepo-setup.cjs — it must never be the thing that fails');

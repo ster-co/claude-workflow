@@ -1,40 +1,42 @@
-# Setup: getting this workflow onto another machine
+# Setup
 
-This is a procedure, not a tour. Follow the five numbered steps top to bottom. Each has
-a command and a check — run the command, then run the check, and do not move on until
-the check says what it should. If a check fails, the step above it is why.
+Installs the `workflow-discipline` plugin and its supporting pieces on a new machine.
+Takes about fifteen minutes. Do the steps in order: each ends with a **Check**, and a
+failed check means the step it belongs to is not done — fix that before moving on.
 
-Windows and macOS/Linux commands are both given wherever they differ.
+Windows (PowerShell) and macOS/Linux commands are both given wherever they differ.
+Windows commands have not yet been run on a real Windows machine — see
+[What has and has not been verified](#what-has-and-has-not-been-verified).
 
-## What has not been verified
+**Checklist**
 
-**Nothing in this document has been run on an actual Windows machine.** The commands
-below are either things run on this machine (macOS) while writing this document, or
-quoted verbatim from a file in this repository — each command below says which. The
-PowerShell behaviour specifically (the `PowerShell` tool-name matchers in `settings.json`,
-the `pwsh` requirement below) is inferred from Claude Code's own hooks documentation and
-from driving the gate scripts on macOS with `tool_name: "PowerShell"` payloads instead of
-`"Bash"` — not from a real Windows install. A colleague on Windows is the first real test
-of this document. If something here is wrong for Windows, that is expected until someone
-runs it and reports back.
+1. [Install the four tools](#step-1--install-the-four-tools): `node`, `git`, `gh`, `uv`
+2. [Give git access to GitHub](#step-2--give-git-access-to-github) (HTTPS via `gh`, or SSH)
+3. [Install the plugin](#step-3--install-the-plugin)
+4. [Copy `CLAUDE.md`, merge the settings, ignore `.serena/`](#step-4--copy-claudemd-merge-the-settings-ignore-serena)
+5. [Restart Claude Code / reload VS Code](#step-5--restart-claude-code--reload-vs-code)
+6. [Open a git repository — twice](#step-6--open-a-git-repository--twice)
+7. [Prove the gates fire](#step-7--prove-the-gates-fire)
 
 ---
 
-## Before you start: what this needs, and why
+## Step 1 — install the four tools
 
-### Required binaries
+| tool | why |
+|---|---|
+| `node` | every hook is a `.cjs` script run with `node` |
+| `git` | the setup hook and the gates find a repository with `git rev-parse --show-toplevel`; `/land` diffs and pushes |
+| `uv` (provides `uvx`) | starts Serena, the code-intelligence server the edit gate depends on |
+| `gh` | `/land` opens pull requests with it; step 2 uses it to log in to GitHub |
 
-| binary | why | source |
-|---|---|---|
-| `node` | every hook is a `.cjs` script Claude Code runs with `node` | run: `node --version` on this machine → `v22.21.1` |
-| `git` | the gates key off `git rev-parse --show-toplevel`; `/land` pushes and diffs | run: `git --version` on this machine → `git version 2.54.0` |
-| `uv` (`uvx`) | starts Serena, the MCP server the edit/commit gates depend on | `.mcp.json`'s comment: *"Requires `uvx` on PATH — this file ships the config, not the uv/uvx binary itself."* |
-| `gh` | `commands/land.md` step 8 says "Open a PR" but never names a tool — opening a PR from the CLI is Claude Code's own convention for GitHub work, and there is nothing else installed here that can do it | inferred, not quoted — `land.md` itself is silent on the mechanism |
+Check what you already have — install only what is missing:
 
-**If any of those four is missing.** `node` normally arrives with Claude Code and `git` is
-usually already there, so `gh` is the one most likely to be absent. Check all four first —
-`node --version`, `git --version`, `uvx --version`, `gh --version` — and install only what
-is missing:
+```
+node --version
+git --version
+gh --version
+uvx --version
+```
 
 ```
 # Windows (winget ships with Windows 10/11)
@@ -49,305 +51,456 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Debian/Ubuntu
 sudo apt install -y nodejs git
-# gh needs its own repository: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+# gh needs its own apt repository: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Open a new terminal afterwards — an installer that edits `PATH` does not change the shell
-you ran it from, and a `uvx` that is installed but not yet on `PATH` fails exactly the same
-way as one that is not installed at all (step 5d).
+**Then close every terminal and open a new one** — and if you use VS Code, quit it fully
+and reopen it (VS Code's integrated terminal and the Claude Code extension inherit `PATH`
+from when VS Code started). An installer that edits `PATH` does not change processes that
+were already running, and a `uvx` that is installed but not on `PATH` fails exactly like
+one that is not installed.
 
-`gh` also needs authenticating once before `/land` can open a pull request: `gh auth login`.
+**Check:** all four `--version` commands print a version, not an error, in a *new* terminal.
 
-**Windows only, and unverified:** Serena's Roslyn language server (used for C#) is
-*believed* to need PowerShell 7+ (`pwsh`) rather than the Windows PowerShell 5.1 that
-ships with the OS. This comes from Serena's own docs, not from anything tested in this
-repository — treat it as something to confirm, not a settled fact, and only relevant if
-you work in C#.
+**Do not skip `uv`.** Without `uvx`, the setup hook refuses to configure any repository
+(it would point the gates at a server that cannot start), so nothing is ever gated. It
+does say so — but only once, at session start, in context you have to ask Claude about.
 
-### Plugins
-
-**`superpowers` is automatic.** `.claude-plugin/plugin.json` declares it as a dependency:
-
-```json
-"dependencies": [{ "name": "superpowers", "marketplace": "claude-plugins-official" }]
-```
-
-— quoted verbatim from that file. A single `/plugin install workflow-discipline@ster-co`
-pulls both. Four of `superpowers`' skills are what the commands actually call by name:
-`brainstorming` (`commands/plan.md`, `commands/ship.md`, `commands/brainstorm.md`),
-`systematic-debugging` (`commands/bug.md`), `writing-plans` (`commands/plan.md`,
-`commands/brainstorm.md`), `finishing-a-development-branch` (`commands/land.md`). If one of
-those commands behaves as though the skill does not exist, `superpowers` did not arrive —
-check `/plugin` for it before looking anywhere else.
-
-**Six more plugins are installed on this machine and are *not* declared dependencies:**
-`pyright-lsp`, `typescript-lsp`, `playwright`, `azure`, `microsoft-docs`, `frontend-design`.
-Checked directly — `grep -rn "mcp__" commands/ agents/ skills/workflow-discipline
-skills/refactor` finds only `mcp__serena__*` names, nowhere else, so none of the six is
-wired into `/ship`, `/plan`, `/execute`, `/brief`, or `/land`: the core loop runs without
-them. That is a statement about what the *commands* call, not about whether the plugins are
-worth having — this is the rest of the working toolset, in regular day-to-day use on this
-machine, and a colleague who wants parity with the operator's own setup should take all six,
-not skip them as niche:
-
-- `microsoft-docs` — ships the `microsoft-learn` MCP server (HTTP,
-  `https://learn.microsoft.com/api/mcp`) plus three skills
-  (`microsoft-code-reference`, `microsoft-docs`, `microsoft-skill-creator`). This is what
-  backs the "check current documentation" rule in `CLAUDE.md` directly, so treat it as
-  load-bearing rather than optional.
-- `azure` — ships an `azure` MCP server (`npx -y @azure/mcp@latest server start`) plus 28
-  skills covering AKS, App Service, Functions, Cosmos DB, storage, cost, diagnostics, and
-  more. Verified by counting the `skills/` subdirectories in the installed plugin cache.
-- `pyright-lsp` / `typescript-lsp` — language servers giving diagnostics beyond what Serena
-  provides for the gates; Serena alone already satisfies the edit gate, so these are extra
-  signal, not a requirement.
-- `playwright` — drives a real browser. `CLAUDE.md` has a rule for exactly this: *"For
-  anything with a UI, drive a real browser. A DOM assertion is not evidence."* That rule is
-  what this plugin backs, so it is load-bearing for UI work rather than a nice-to-have.
-- `frontend-design` — guidance for visual and taste-driven design work; not referenced by
-  any command, agent, or skill in this repository, but part of the operator's own toolset
-  for that kind of work.
-
-A colleague who wants the whole toolset, not just the core loop, installs all six:
-
-```
-/plugin install microsoft-docs@claude-plugins-official
-/plugin install azure@claude-plugins-official
-/plugin install pyright-lsp@claude-plugins-official
-/plugin install typescript-lsp@claude-plugins-official
-/plugin install playwright@claude-plugins-official
-/plugin install frontend-design@claude-plugins-official
-```
-
-Or install individually, picking by what each gives you above — none of the six is required
-for `/ship` to run, but two of them (`microsoft-docs`, `playwright`) back rules `CLAUDE.md`
-states as musts.
-
-### MCP servers
-
-`serena` ships in `.mcp.json` and is required — see step 1.
-
-**Correction to check before you read further:** a `grep -rn "mcp__" commands/ agents/
-skills/workflow-discipline skills/refactor` (same command as above) turns up nothing named
-`mcp__memory__`, `mcp__claude_browser__`, `mcp__computer*`, or `mcp__remote*`. Those
-prefixes exist only in `skills/synced/` — Anthropic's own bundled global skills
-(`computer-use`, `chrome-browser`, `built-in-browser`, `import-memory`) that ship with the
-Claude Code app itself, on every account, independent of installing this plugin. Nothing
-in `/ship`, `/plan`, `/execute`, `/brief`, or `/land` calls them. Whether they work for a
-colleague depends on their own Claude Code app settings and entitlements (Settings →
-Capabilities, computer use, connected browsers), not on anything in this setup.
+**Windows, C# only, unverified:** Serena's C# language server is believed to need
+PowerShell 7+ (`pwsh`) rather than the built-in Windows PowerShell 5.1. Only relevant if
+you work in C#; confirm against Serena's docs before relying on it.
 
 ---
 
-## Step 1 — install `uv`, first
+## Step 2 — give git access to GitHub
 
-Without it, nothing downstream works, and nothing tells you loudly — it tells you exactly
-once, in a `SessionStart` message you have to be looking for.
+The plugin lives in a **private** repository, `ster-co/claude-workflow`. You need to be a
+member of the `ster-co` organisation with read access, and git on your machine needs to be
+able to authenticate to GitHub. Pick **one** of the two routes.
+
+### Route A — HTTPS through `gh` (simplest, recommended)
 
 ```
-# Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-# macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
+gh auth login
 ```
 
-Both commands are quoted verbatim from `hooks/repo-setup.cjs`'s own message text (see
-`hooks/repo-setup.cjs`, the `uvxOnPath()` failure branch) and from `README.md`.
+Answer: `GitHub.com` → protocol **HTTPS** → **Yes** to "Authenticate Git with your GitHub
+credentials" → log in with a web browser. This also gives `/land` what it needs to open
+pull requests.
 
 **Check:**
 
 ```
-uvx --version
+gh auth status
+git ls-remote https://github.com/ster-co/claude-workflow.git HEAD
 ```
 
-expect something like `uvx 0.11.21 (...)` — any version string, not an error.
+The second command prints one line (a commit hash and `HEAD`). An authentication error or
+"Repository not found" means either the login did not take or your account has no access
+to the repository — ask for access before going further.
 
-**Why this is first, not step 3 or 4:** `hooks/repo-setup.cjs` runs on every `SessionStart`
-and checks for `uvx` on `PATH` before it writes a repository's `.serena/project.yml`. Miss
-it, and the hook writes nothing — not "writes a broken config", nothing at all — because
-`.serena/project.yml` existing is exactly what `hooks/gates/gate-lib.cjs`'s `findGatedRoot`
-checks to decide a repo is gated. No file, no gate, on any repository, ever, until a new
-session starts with `uvx` reachable. This is proved in step 5, not asserted here.
+### Route B — SSH (optional; for people who already use SSH, or whose network or org requires it)
+
+Use this if you already clone with `git@github.com:...` URLs, if HTTPS to GitHub is blocked
+on your network, or if you simply prefer keys over tokens.
+
+The easy way is still `gh`, which can generate and upload the key for you:
+
+```
+gh auth login
+```
+
+Answer: `GitHub.com` → protocol **SSH** → **Generate a new SSH key** (or pick an existing
+`~/.ssh/id_ed25519.pub`) → log in with a web browser. `gh` uploads the public key to your
+GitHub account.
+
+By hand instead:
+
+```
+# macOS/Linux and Windows (OpenSSH ships with Windows 10/11)
+ssh-keygen -t ed25519 -C "you@example.com"
+# accept the default file location; a passphrase is recommended
+```
+
+Then add the **public** key (`~/.ssh/id_ed25519.pub`, on Windows
+`%USERPROFILE%\.ssh\id_ed25519.pub`) at GitHub → Settings → SSH and GPG keys → New SSH key,
+or with `gh ssh-key add ~/.ssh/id_ed25519.pub`.
+
+If you set a passphrase, load the key into an agent so you are not asked on every fetch:
+
+```
+# macOS
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+
+# Linux
+eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
+
+# Windows (PowerShell as Administrator, once)
+Get-Service ssh-agent | Set-Service -StartupType Automatic
+Start-Service ssh-agent
+ssh-add $env:USERPROFILE\.ssh\id_ed25519
+```
+
+**If the organisation uses SAML single sign-on**, a key is not usable for `ster-co`
+repositories until you authorise it: GitHub → Settings → SSH and GPG keys → **Configure
+SSO** next to the key → Authorize for `ster-co`. The symptom of skipping this is
+"Repository not found" or a permission error, even though `ssh -T` below succeeds.
+
+**Check:**
+
+```
+ssh -T git@github.com
+git ls-remote git@github.com:ster-co/claude-workflow.git HEAD
+```
+
+The first prints `Hi <your-username>! You've successfully authenticated...` (it exits
+non-zero — that is normal for this command). The second prints one line with a commit
+hash.
+
+With SSH, install the marketplace in step 3 using the SSH URL rather than the shorthand.
 
 ---
 
-## Step 2 — install the plugin
+## Step 3 — install the plugin
+
+Run these inside Claude Code — in the terminal (`claude`) or in the VS Code extension's
+chat box:
 
 ```
 /plugin marketplace add ster-co/claude-workflow
 /plugin install workflow-discipline@ster-co
 ```
 
-The plugin name `workflow-discipline` and marketplace name `ster-co` are quoted
-verbatim from `.claude-plugin/plugin.json` (`"name": "workflow-discipline"`) and
-`.claude-plugin/marketplace.json` (`"name": "`ster-co`"`) — read, not typed from
-memory. The repository is private to the `ster-co` organisation, so you need to be a member with
-read access for `/plugin marketplace add` to reach it.
+If you chose SSH in step 2, add the marketplace by its SSH URL instead:
 
-**Check:** `/plugin` lists `workflow-discipline@ster-co` and
-`superpowers@claude-plugins-official` as installed — the second arrived automatically from
-step 2's dependency declaration, not from a separate command.
+```
+/plugin marketplace add git@github.com:ster-co/claude-workflow.git
+/plugin install workflow-discipline@ster-co
+```
+
+`superpowers` is installed automatically as a dependency — `.claude-plugin/plugin.json`
+declares it. You do not install it separately.
+
+**Check:** `/plugin` lists both `workflow-discipline@ster-co` and
+`superpowers@claude-plugins-official` as installed and enabled. If
+`/plugin marketplace add` fails with an authentication or "not found" error, step 2 is not
+done: rerun its check.
+
+**Updating later:** from a terminal, `claude plugin marketplace update ster-co` then
+`claude plugin update workflow-discipline@ster-co`, then a new session (step 5).
 
 ---
 
-## Step 3 — copy `settings.json` and `CLAUDE.md`
+## Step 4 — copy `CLAUDE.md`, merge the settings, ignore `.serena/`
 
-Both live at `~/.claude/` (`%USERPROFILE%\.claude\` on Windows). The operator of this
-repository has confirmed overwriting a colleague's own copies of these two files is fine.
+Step 3 already downloaded the whole repository to
+`~/.claude/plugins/marketplaces/ster-co/` (`%USERPROFILE%\.claude\plugins\marketplaces\ster-co\`
+on Windows). You do not need to clone it. Three things to do from there.
 
-**You do not need to clone this repository.** Step 2's `/plugin marketplace add` already
-cloned it — a marketplace is fetched to `~/.claude/plugins/marketplaces/<marketplace-name>/`,
-and this marketplace is named `ster-co`, so the files are sitting at
-`~/.claude/plugins/marketplaces/ster-co/`. Copy from there:
+### 4a. Copy `CLAUDE.md`
+
+This makes the working rules **always-on** context in every session. A plugin cannot ship
+that — the `workflow-discipline` skill is the fallback, but it is only loaded on the turns
+`/ship` and `/plan` run. This overwrites any `~/.claude/CLAUDE.md` you already have; back
+yours up first if you care about it.
 
 ```
 # macOS/Linux
-SRC=~/.claude/plugins/marketplaces/ster-co
-cp "$SRC/settings.json" ~/.claude/settings.json
-cp "$SRC/CLAUDE.md"     ~/.claude/CLAUDE.md
+cp ~/.claude/plugins/marketplaces/ster-co/CLAUDE.md ~/.claude/CLAUDE.md
 
 # Windows (PowerShell)
-$src = "$env:USERPROFILE\.claude\plugins\marketplaces\ster-co"
-copy "$src\settings.json" "$env:USERPROFILE\.claude\settings.json"
-copy "$src\CLAUDE.md"     "$env:USERPROFILE\.claude\CLAUDE.md"
+copy "$env:USERPROFILE\.claude\plugins\marketplaces\ster-co\CLAUDE.md" "$env:USERPROFILE\.claude\CLAUDE.md"
 ```
 
-**Check:** `ls ~/.claude/plugins/marketplaces/ster-co` lists `SETUP.md`, `settings.json` and
-`CLAUDE.md` among others. If that directory does not exist, step 2 did not complete — fix
-that before copying anything.
+### 4b. Merge the settings — do not copy `settings.json` over yours
 
-If you would rather read the instructions from a checkout, cloning works too, but it is not
-required for any step here.
+The repository's `settings.json` is the author's own. Its `hooks` block wires every hook to
+`~/.claude/hooks/...`, which exists on the author's machine and **not on yours** — on
+yours the plugin already runs the same hooks from its own install directory. Copying the
+file wholesale would add seventeen hooks pointing at files that do not exist, and would
+also replace the `enabledPlugins` list that step 3 just wrote, switching the plugin off.
 
-**What each brings:**
+Instead, this merges everything else (permission mode `auto`, effort `high`, the `Concise`
+output style, attribution off, and the author's other preferences) into your own file,
+drops `hooks`, and keeps your `enabledPlugins` as they are. It is the same command on
+every platform — it uses `node`, which step 1 installed:
 
-- `settings.json` carries the hook wiring (`PreToolUse`, `PostToolUse`, `SessionStart`,
-  `Stop`, `PreCompact`, `SubagentStart`/`Stop`, `UserPromptSubmit` — read directly from the
-  file, see `hooks` key), the `Edit|Write|Bash|PowerShell` and `Bash|PowerShell` matchers
-  that make the gates fire on Windows's PowerShell tool as well as Bash, and the
-  effort/permission defaults (`"permissions": {"defaultMode": "auto"}`,
-  `"effortLevel": "high"`). It also carries this operator's own `enabledPlugins` list
-  (the seven named above) — a colleague who has not installed all seven will simply not
-  have those extras enabled; nothing in the core loop needs them, per the plugins section
-  above. **It also registers a third-party marketplace**, not just this operator's own
-  plugin list — `settings.json`'s `extraKnownMarketplaces` points at
-  `github.com/microsoft/skills`. Copying the file adds that source to a colleague's
-  `/plugin marketplace` list, the same as the official one. Read directly from the cached
-  copy of that repository: it is Microsoft's own catalogue of skills, agents and MCP
-  configs for Azure SDKs and Microsoft AI Foundry (`azure-skills`, `azure-sdk-python`,
-  `azure-sdk-dotnet`, `deep-wiki`, and more — 175 skills at last count, per that repo's own
-  README). Registering the marketplace only makes its plugins installable; nothing from it
-  is in `enabledPlugins`, so nothing installs merely by copying this file — a colleague
-  would still run `/plugin install <name>@skills` to pull anything from it.
-- `CLAUDE.md` restores the discipline as **always-on** context — every turn, not only the
-  turns where a command pulls it in. A plugin cannot ship this file as project context; that
-  channel does not exist in the plugin system. The `workflow-discipline` skill is the
-  fallback a plugin-only install gets, loaded explicitly by `/ship` and `/plan` as the first
-  thing they do — real coverage, but only on the turns those commands run. Copying the file
-  is strictly better where you can do it.
+```
+node -e "const fs=require('fs'),path=require('path'),os=require('os');const dir=path.join(os.homedir(),'.claude');const src=JSON.parse(fs.readFileSync(path.join(dir,'plugins','marketplaces','ster-co','settings.json'),'utf8'));const file=path.join(dir,'settings.json');let own={};try{own=JSON.parse(fs.readFileSync(file,'utf8'))}catch(e){if(e.code!=='ENOENT')throw e}delete src.hooks;const out={...own,...src,enabledPlugins:own.enabledPlugins,extraKnownMarketplaces:{...own.extraKnownMarketplaces,...src.extraKnownMarketplaces}};fs.writeFileSync(file,JSON.stringify(out,null,2)+'\n');console.log('merged into '+file)"
+```
 
-**Check:** `cat ~/.claude/settings.json` shows your own copy's `hooks` key populated (not
-empty), and `cat ~/.claude/CLAUDE.md` shows the "Operating style" section from this
-repository's `CLAUDE.md`, not whatever was there before.
+It prints `merged into <path>/settings.json`.
+
+The merge also registers one extra marketplace, `skills` (`github.com/microsoft/skills`,
+Microsoft's catalogue of Azure SDK and Foundry skills). Registering only makes its plugins
+installable; nothing from it is installed.
+
+### 4c. Make git ignore `.serena/` everywhere
+
+The setup hook writes a `.serena/` folder into each repository you open. It must never be
+committed, and on the author's machine a global git ignore rule guarantees that. Yours
+does not have that rule yet. This adds it to whichever global ignore file git already
+uses (or git's default one), and does nothing if the line is already there:
+
+```
+# macOS/Linux
+f=$(git config --global --path core.excludesFile || echo "$HOME/.config/git/ignore")
+mkdir -p "$(dirname "$f")"
+grep -qxF '.serena/' "$f" 2>/dev/null || echo '.serena/' >> "$f"
+
+# Windows (PowerShell)
+$f = git config --global --path core.excludesFile
+if (-not $f) { $f = "$env:USERPROFILE\.config\git\ignore" }
+New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null
+if (-not (Select-String -Quiet -SimpleMatch -Pattern '.serena/' -Path $f -ErrorAction SilentlyContinue)) { Add-Content $f '.serena/' }
+```
+
+Do not point `core.excludesFile` somewhere new to do this: Claude Code writes its own
+`**/.claude/settings.local.json` rule into whichever file is in effect, and moving it
+orphans that rule.
+
+**Check (all of step 4):**
+
+```
+# the rules file is in place
+head -5 ~/.claude/CLAUDE.md                      # shows "# Global instructions"
+
+# settings merged without hooks, plugin still enabled
+node -e "const s=require(require('os').homedir()+'/.claude/settings.json');console.log('stale hooks:',JSON.stringify(s.hooks||{}).includes('.claude/hooks/')?'YES - see Troubleshooting':'none');console.log(s.enabledPlugins)"
+
+# .serena/ is ignored (run inside any git repository)
+git check-ignore -v .serena/project.yml          # prints the ignore file and ".serena/"
+```
+
+It must print `stale hooks: none`, and `enabledPlugins` must include
+`workflow-discipline@ster-co: true`.
 
 ---
 
-## Step 4 — restart Claude Code
+## Step 5 — restart Claude Code / reload VS Code
 
-Plugin `hooks/` and `.mcp.json` are read once at session start, not watched. A hook or MCP
-config change from steps 2–3 has no effect on a session that was already running —
-verbatim from `README.md`'s "Installing this as a plugin" section.
+Hooks, plugins and MCP servers are read **once, when a session starts**. Nothing you
+installed or changed in steps 3–4 affects a session that was already running.
 
-**Check:** start a brand-new session (not a resumed one) before step 5.
+- **Terminal:** exit every running `claude` (`/exit` or Ctrl+D) and start a new one.
+  Start fresh — not `claude --resume` or `claude --continue`.
+- **VS Code:** open the Command Palette (Ctrl+Shift+P / Cmd+Shift+P) → **Developer: Reload
+  Window**. Then start a **new** conversation in the Claude Code panel rather than
+  continuing an old one. (For a plugin change alone, a new conversation is enough — plugin
+  changes apply to conversations started afterwards. After installing a tool in step 1,
+  quit and reopen VS Code entirely: a reload does not pick up a new `PATH`.)
+
+**The same rule applies later:** any time you install or update a plugin, change
+`settings.json`, or open a repository for the first time (step 6), start a new session. If
+something "should work" but doesn't, a new session is the first thing to try.
+
+**Check:** in the new session, `/mcp` lists `serena` as connected. The very first time
+this can take a minute or so — `uvx` is downloading Serena. If it stays failed, see
+[Troubleshooting](#troubleshooting).
 
 ---
 
-## Step 5 — verify it actually works
+## Step 6 — open a git repository — twice
 
-This is the step that matters. Files existing is not evidence; the gates firing is. Do
-this in a **scratch git repository with one `.py` file** — not this repository, and not
-one you care about.
+**The discipline only switches on inside a git repository.** At session start the setup
+hook asks git for the repository root; if the folder is not inside a git repository, it
+does nothing, no `.serena/project.yml` is written, and the edit and commit gates never
+fire. The slash commands (`/ship`, `/plan`, `/land`, …) still load, but nothing is
+enforced and Serena has no project to index.
+
+Three rules follow from that:
+
+1. **Open the repository folder itself** — in VS Code, *File → Open Folder…* on the folder
+   that contains `.git`. A parent folder holding several repositories is not itself a
+   repository, and a session there configures nothing.
+2. **The repository needs source files the hook recognises:** any `.py`, any
+   `.ts/.tsx/.js/.jsx/.mjs/.cjs`, any `.cs`, or ten or more `.yml/.yaml`. A docs-only or
+   empty repository is left alone, silently. Add code and the next session configures it.
+3. **A folder that isn't a repository yet can be made into one** — locally, no GitHub
+   needed:
+
+   ```
+   cd path/to/your/project
+   git init
+   git add -A
+   git commit -m "Initial commit"
+   ```
+
+   If `git commit` complains that it does not know who you are, set your name and email
+   once: `git config --global user.name "Your Name"` and
+   `git config --global user.email "you@example.com"`. A GitHub remote can be added later
+   (`gh repo create`, or `git remote add origin <url>`); nothing here needs one, except
+   `/land`, which pushes and opens a PR.
+
+### What happens, session by session
+
+**First session in a repository.** The setup hook sees no `.serena/project.yml`, counts the
+file types, and writes one listing the language servers it chose (for example `python`,
+`typescript`). It reports this to Claude — not to you; you will not see a banner. To see
+it, ask: *"What did the SessionStart hook say about Serena?"* Or just look:
 
 ```
-mkdir /tmp/setup-check && cd /tmp/setup-check
+cat .serena/project.yml        # Windows: type .serena\project.yml
+```
+
+Serena itself already started before that file existed, so it has not loaded those
+language servers yet.
+
+**Start a new session** (step 5 — new terminal session, or a new conversation in VS Code;
+reload the window if in doubt).
+
+**Second session onward — this is what "working" looks like:**
+
+- `/mcp` shows `serena` connected.
+- Serena's dashboard is at <http://localhost:24282/dashboard/> (the next port up —
+  24283, 24284… — for each additional session running at once). It does **not** open a
+  browser tab by itself; that is deliberate.
+- `.serena/project.yml` exists and `git status` does not show `.serena/` (step 4c).
+- When Claude goes to edit a source file without first checking what depends on it, the
+  edit is **denied** with a message naming `mcp__serena__find_referencing_symbols`. Claude
+  then runs that lookup and retries. This deny-lookup-retry loop is the system working, not
+  an error — you will see it regularly.
+- Committing is similarly gated: Claude has to run `git diff` in the same turn before
+  `git commit` goes through (`git status` does not count).
+
+If you open the same repository again later, nothing is rewritten — an existing
+`.serena/project.yml` is never touched. If the repository's languages change a lot
+(say a Python repo gains a TypeScript frontend), delete `.serena/project.yml` and start a
+new session to regenerate it — the file is local and git-ignored, so nothing is lost.
+
+---
+
+## Step 7 — prove the gates fire
+
+Files existing is not evidence; a denied edit is. Do this once, in a throwaway repository —
+not one you care about.
+
+```
+# macOS/Linux
+mkdir -p /tmp/setup-check && cd /tmp/setup-check
+# Windows (PowerShell)
+mkdir $env:TEMP\setup-check; cd $env:TEMP\setup-check
+
 git init
-printf 'def greet(name):\n    return f"hello {name}"\n\ndef caller():\n    return greet("world")\n' > app.py
-git add app.py && git commit -m init
 ```
 
-**5a. Start a session in that directory.** Expect the session to open with a message
-naming the file it created and the language server it chose — the literal text this
-machine produced for an equivalent scratch repo:
+Create `app.py` with this content:
 
-> *"This repository had no Serena configuration. .serena/project.yml was created with
-> language servers: python. Serena reads a project's configuration once when its server
-> starts, so these servers are available from the next session rather than this one.
-> .serena/ is gitignored, so this added nothing that git status reports."*
+```python
+def greet(name):
+    return f"hello {name}"
 
-Confirm the file exists: `cat .serena/project.yml` should show `language_servers:` with
-`- python` under it.
+def caller():
+    return greet("world")
+```
 
-**5b. Try to edit `app.py` without looking anything up first** — ask Claude to change
-`"hello {name}"` to `"hi {name}"` directly, with no prior tool call in that turn. Expect
-the edit to be **denied**, with a reason naming the exact tool to call:
+```
+git add app.py
+git commit -m init
+```
 
-> *"No reference lookup has been run this turn, and app.py lives in setup-check. Find out
+**7a. First session.** Start Claude Code in that folder (`claude`, or *File → Open
+Folder…* in VS Code and a new conversation). Check `.serena/project.yml` now exists and
+lists `- python` under `language_servers:`. Then start a **second** new session there.
+
+**7b. Edit without looking first.** In the second session, ask Claude to change
+`"hello {name}"` to `"hi {name}"`. Expect the first edit attempt to be **denied**, with a
+reason like:
+
+> *No reference lookup has been run this turn, and app.py lives in setup-check. Find out
 > what depends on the symbol you are about to change —
 > `mcp__serena__find_referencing_symbols({name_path: "<symbol>", relative_path: "<file>"})`
-> — report what it returns, then retry. ..."*
+> — report what it returns, then retry. ...*
 
-This is the literal `permissionDecisionReason` produced by driving `hooks/gates/edit-gate.cjs`
-against an equivalent scratch repo on this machine.
+**7c. Let it recover.** Claude should call `find_referencing_symbols` on `greet` (finding
+`caller`) and retry — and the edit goes through.
 
-**5c. Satisfy the gate properly.** Ask Claude to call
-`mcp__serena__find_referencing_symbols` on `greet` (or just let it do this on its own once
-denied — that is the point of the deny message). Then retry the same edit. Expect it to go
-through this time with no denial.
+If 7a produced no `.serena/project.yml`, or 7b's edit went through with no denial, the
+setup is not working: see Troubleshooting.
 
-**5d. If you skipped step 1**, 5a fails instead: the session-start message names `uvx`
-directly and says the repository is **not gated** —
+Delete `setup-check` afterwards.
 
-> *"This repository has files Serena could configure, but uvx is not on PATH, so
-> .serena/project.yml was not written. This repository is therefore not gated: the edit
-> and commit discipline hooks key on that file existing, and it does not. ..."*
+---
 
-— and `.serena/project.yml` does not exist. This was reproduced directly on this machine:
-running `hooks/repo-setup.cjs` against a scratch repo with `PATH` stripped to nothing but
-`git`, `node` and `which` (no `uvx`) produced exactly that message and wrote no file; the
-same repo with a normal `PATH` produced the 5a message and did write the file. The
-project's own regression suite covers the identical case —
-`hooks/test/test-repo-setup.cjs`'s *"no config is written when uvx is not on PATH"* test,
-built the same way (a `PATH` holding only `git`, `node`, and the platform's `which`/`where`,
-symlinked in, with `uvx` genuinely absent rather than mocked as absent).
+## Troubleshooting
 
-**5e. The automated suite** — only if you have a checkout of this repository, not from a
-plugin-only install (a plugin install does not give you `hooks/test/`):
+| symptom | likely cause | fix |
+|---|---|---|
+| `/plugin marketplace add` fails with an auth error or "not found" | git cannot reach the private repo | step 2's check; with SSH, check SSO authorisation and use the SSH URL |
+| `/plugin` doesn't list `workflow-discipline` as enabled | `settings.json` was overwritten after install | `claude plugin enable workflow-discipline@ster-co`; use step 4b, not a plain copy |
+| hook errors mentioning `.claude/hooks/...cjs` / "Cannot find module", or `stale hooks: YES` in step 4's check | `settings.json` was copied wholesale, so it has the author's `hooks` block | delete the `hooks` block from `~/.claude/settings.json` by hand (4b's merge keeps hooks already in your file), then `claude plugin enable workflow-discipline@ster-co` |
+| no `.serena/project.yml` after a session | not in a git repo; no recognised source files; or `uvx` not on `PATH` | step 6 rules; `uvx --version` in a *new* terminal; ask Claude what the SessionStart hook reported |
+| `/mcp` shows `serena` failed | `uvx` missing from the `PATH` Claude Code started with | fully quit and reopen VS Code / the terminal after installing uv |
+| edits are never denied | repo not configured (above), first session in the repo, or the plugin's hooks are not loaded | check `.serena/project.yml`; `/hooks` should list `edit-gate.cjs` under `PreToolUse`; start a new session |
+| every edit is denied, even after a lookup | Serena not connected, so the lookup never succeeds | `/mcp`; start a new session |
+| `git status` shows `.serena/` | step 4c not done | run 4c |
+| a change to the plugin or settings "does nothing" | old session still running | new session (step 5) |
+| a command acts as if `brainstorming` or `systematic-debugging` doesn't exist | `superpowers` did not install | `/plugin` — install `superpowers@claude-plugins-official` |
+
+Two environment-variable escape hatches: `CLAUDE_NO_AUTO_REPO_SETUP=1` stops the setup hook
+writing `.serena/project.yml` (for a repository where you do not want Serena at all), and
+`SKIP_CODE_GATES=1` switches the edit and commit gates off. Both are for exceptions, not
+for making a denial go away.
+
+---
+
+## Optional: the rest of the author's toolset
+
+None of these is needed for `/ship`, `/plan`, `/execute`, `/brief` or `/land` — no command,
+agent or skill in this repository calls them. They are the rest of the author's day-to-day
+setup; two of them back rules in `CLAUDE.md` directly.
+
+| plugin | what it gives you |
+|---|---|
+| `microsoft-docs` | the Microsoft Learn MCP server and three skills; backs `CLAUDE.md`'s "check current documentation" rule — **recommended** |
+| `playwright` | drives a real browser; backs `CLAUDE.md`'s "for anything with a UI, drive a real browser" rule — **recommended** for UI work |
+| `azure` | an Azure MCP server plus skills for AKS, App Service, Functions, Cosmos DB, storage, cost, diagnostics |
+| `pyright-lsp`, `typescript-lsp` | extra diagnostics beyond Serena; not needed for the gates |
+| `frontend-design` | guidance for visual design work |
+
+```
+/plugin install microsoft-docs@claude-plugins-official
+/plugin install playwright@claude-plugins-official
+/plugin install azure@claude-plugins-official
+/plugin install pyright-lsp@claude-plugins-official
+/plugin install typescript-lsp@claude-plugins-official
+/plugin install frontend-design@claude-plugins-official
+```
+
+Start a new session afterwards.
+
+Skills such as `computer-use`, `chrome-browser` and `import-memory` ship with the Claude
+Code app itself, not with this plugin; whether they work depends on your own Claude Code
+settings and account, not on anything here.
+
+---
+
+## Running the test suite (checkout only)
+
+A plugin install has no `hooks/test/`; step 7 is your check. With a full checkout of this
+repository at `~/.claude`:
 
 ```
 node ~/.claude/hooks/test/verify-all.cjs
 ```
 
-Run on this machine just now: **7 suites, 359 passed, 0 failed, exit code 0.** Per-suite
-counts were `68, 65, 87, 69, 24, 22, 24` (sums to 359); `verify-all.cjs` prints these seven
-lines and no total.
-
-| install shape | which check applies |
-|---|---|
-| plugin install only (`/plugin install`) | 5a–5d, in a scratch repo — this is the only check you have |
-| full checkout of this repository | 5a–5d, plus 5e (`verify-all.cjs`) as a second, independent check |
+It prints one pass/fail line per suite; exit code 0 means every suite passed.
 
 ---
 
-## Summary: commands run here vs. quoted from a file
+## What has and has not been verified
 
-- **Run on this machine** while writing this document: `uvx --version`, `node --version`,
-  `git --version`, `gh --version`, the full scratch-repo sequence in step 5 (both with a
-  normal `PATH` and with `PATH` stripped to prove step 5d), and
-  `node ~/.claude/hooks/test/verify-all.cjs`.
-- **Quoted from a file, not run by this document's author on Windows:** the `uv` installer
-  commands (from `hooks/repo-setup.cjs` and `README.md`), the `/plugin marketplace add` /
-  `/plugin install` commands (names read from `.claude-plugin/plugin.json` and
-  `.claude-plugin/marketplace.json`, but the install itself not run — installing plugins is
-  outside what this document's author is permitted to do on this machine), and everything
-  marked unverified above.
+- **Run on macOS** while writing this document: the version checks in step 1, the scratch
+  repository in step 7 (including the `uvx`-missing case, where the hook writes no config
+  and reports the repository as not gated), the settings merge in step 4b and the ignore
+  rule in step 4c (both against a throwaway home directory), and the Serena dashboard
+  port.
+- **Quoted, not run here:** the `uv` installer commands (from `hooks/repo-setup.cjs`'s own
+  message), the plugin install commands (names read from `.claude-plugin/plugin.json` and
+  `.claude-plugin/marketplace.json`; the install itself has not been run on this machine,
+  which is the source rather than an install).
+- **Not run on Windows at all.** Every PowerShell command here, and the PowerShell
+  tool-name matchers in the plugin's hooks, come from Claude Code's documentation and from
+  driving the gate scripts on macOS with PowerShell-shaped input. The first colleague on
+  Windows is the real test; if something is wrong, report it.

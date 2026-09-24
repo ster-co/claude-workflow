@@ -4,7 +4,7 @@ What is installed, what enforces what, and how to check it still works.
 Last substantive change 2026-09-22. Claude Code **2.1.278**, VS Code extension.
 
 **Setting this up on another machine?** This file is a reference, not a procedure —
-start with [`SETUP.md`](SETUP.md) instead: five ordered steps, each with a command and a
+start with [`SETUP.md`](SETUP.md) instead: seven ordered steps, each with a command and a
 check, ending in a scratch repo that proves the gates actually fire.
 
 Design notes and the evidence behind each choice live in `audit/`:
