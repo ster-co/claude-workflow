@@ -23,11 +23,11 @@ subdirectory. A colleague gets the whole setup — commands, agents, hooks and S
 config — in two commands and a restart:
 
 ```
-/plugin marketplace add <org>/<repo>
-/plugin install workflow-discipline@klosoter-workflow
+/plugin marketplace add ster-co/claude-workflow
+/plugin install workflow-discipline@ster-co
 ```
 
-`<org>/<repo>` above is a placeholder, not a working path — this repository is not yet
+`ster-co/claude-workflow` above is a placeholder, not a working path — this repository is not yet
 published anywhere `/plugin marketplace add` can reach. Replace it with the real
 `owner/repo` once it is.
 
@@ -41,7 +41,7 @@ five command files under `commands/` invoke four of its skills (`brainstorming`,
 plugin cannot vendor another marketplace's skill. `superpowers` lives in the
 `claude-plugins-official` marketplace, not this one, so `.claude-plugin/marketplace.json`
 lists that marketplace in `allowCrossMarketplaceDependenciesOn` to permit it; a single
-`/plugin install workflow-discipline@klosoter-workflow` pulls both.
+`/plugin install workflow-discipline@ster-co` pulls both.
 
 ### Serena — required, not optional
 

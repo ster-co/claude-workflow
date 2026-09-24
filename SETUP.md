@@ -45,7 +45,7 @@ you work in C#.
 "dependencies": [{ "name": "superpowers", "marketplace": "claude-plugins-official" }]
 ```
 
-— quoted verbatim from that file. A single `/plugin install workflow-discipline@klosoter-workflow`
+— quoted verbatim from that file. A single `/plugin install workflow-discipline@ster-co`
 pulls both. Four of `superpowers`' skills are what the commands actually call by name:
 `brainstorming` (`commands/plan.md`, `commands/ship.md`, `commands/brainstorm.md`),
 `systematic-debugging` (`commands/bug.md`), `writing-plans` (`commands/plan.md`,
@@ -147,17 +147,17 @@ session starts with `uvx` reachable. This is proved in step 5, not asserted here
 ## Step 2 — install the plugin
 
 ```
-/plugin marketplace add <org>/<repo>
-/plugin install workflow-discipline@klosoter-workflow
+/plugin marketplace add ster-co/claude-workflow
+/plugin install workflow-discipline@ster-co
 ```
 
-The plugin name `workflow-discipline` and marketplace name `klosoter-workflow` are quoted
+The plugin name `workflow-discipline` and marketplace name `ster-co` are quoted
 verbatim from `.claude-plugin/plugin.json` (`"name": "workflow-discipline"`) and
-`.claude-plugin/marketplace.json` (`"name": "klosoter-workflow"`) — read, not typed from
-memory. `<org>/<repo>` is a placeholder: this repository is not published anywhere
-`/plugin marketplace add` can reach yet. Replace it with the real `owner/repo` once it is.
+`.claude-plugin/marketplace.json` (`"name": "`ster-co`"`) — read, not typed from
+memory. The repository is private to the `ster-co` organisation, so you need to be a member with
+read access for `/plugin marketplace add` to reach it.
 
-**Check:** `/plugin` lists `workflow-discipline@klosoter-workflow` and
+**Check:** `/plugin` lists `workflow-discipline@ster-co` and
 `superpowers@claude-plugins-official` as installed — the second arrived automatically from
 step 2's dependency declaration, not from a separate command.
 
