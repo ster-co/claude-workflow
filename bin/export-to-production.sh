@@ -69,6 +69,32 @@ if grep -rIil "$OLD_PAT" "$STAGE" 2>/dev/null | grep -q .; then
 fi
 say "   no absolute paths, no client names"
 
+# A release nobody can install is worse than no release: Claude Code pins a
+# plugin to the version in plugin.json, so `claude plugin update` finds nothing
+# when the field has not moved. Four promotions went out before this was
+# noticed, each carrying real fixes that no installed copy ever received.
+say "== the version must have moved since the last release =="
+LOCAL_VER="$(node -e "process.stdout.write(require('$REPO/.claude-plugin/plugin.json').version)")"
+# GitHub does not serve `git archive --remote`, so read production's manifest
+# from a shallow clone. An unreadable remote must not silently pass the check.
+PROBE="$STAGE.probe"
+rm -rf "$PROBE"
+REMOTE_VER=""
+if git clone -q --depth 1 --filter=blob:none --no-checkout "$PROD_REMOTE" "$PROBE" 2>/dev/null; then
+  REMOTE_VER="$(git -C "$PROBE" show HEAD:.claude-plugin/plugin.json 2>/dev/null \
+    | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).version||'')}catch{}})" || true)"
+  rm -rf "$PROBE"
+else
+  die "cannot read production's manifest -- refusing to release blind"
+fi
+if [ -z "$REMOTE_VER" ]; then
+  say "   $LOCAL_VER (production has no manifest yet -- first release)"
+elif [ "$LOCAL_VER" = "$REMOTE_VER" ]; then
+  die "plugin.json is still $LOCAL_VER, same as production -- bump it or nobody receives this release"
+else
+  say "   $LOCAL_VER (production has $REMOTE_VER)"
+fi
+
 say "== the plugin must still validate =="
 ( cd "$STAGE" && claude plugin validate . >/dev/null 2>&1 ) || die "claude plugin validate rejected the export"
 say "   validate passed"
