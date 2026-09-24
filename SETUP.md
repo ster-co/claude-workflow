@@ -27,7 +27,7 @@ Windows commands have not yet been run on a real Windows machine — see
 | `node` | every hook is a `.cjs` script run with `node` |
 | `git` | the setup hook and the gates find a repository with `git rev-parse --show-toplevel`; `/land` diffs and pushes |
 | `uv` (provides `uvx`) | starts Serena, the code-intelligence server the edit gate depends on |
-| `gh` | `/land` opens pull requests with it; step 2 uses it to log in to GitHub |
+| `gh` | **optional.** Nothing in the workflow calls it — `git grep gh` across `commands/`, `agents/`, `hooks/` and `skills/` returns nothing. `commands/land.md:74` says only "Open a PR" and names no tool. It is a convenience for two things: logging in to GitHub in step 2 (Git Credential Manager does the same on Windows) and opening the pull request at the end of `/land` instead of clicking the compare link git prints on push |
 
 Check what you already have — install only what is missing:
 
@@ -79,15 +79,35 @@ The plugin lives in a **private** repository, `ster-co/claude-workflow`. You nee
 member of the `ster-co` organisation with read access, and git on your machine needs to be
 able to authenticate to GitHub. Pick **one** of the two routes.
 
-### Route A — HTTPS through `gh` (simplest, recommended)
+### Route A — HTTPS (simplest, recommended)
+
+**On Windows, try nothing first.** Git for Windows bundles Git Credential Manager, which
+opens a browser login the first time git needs credentials. So just run step 2's
+`claude plugin marketplace add` and let it prompt you. If it succeeds, you are done — skip
+to step 3.
+
+If it does not prompt, or fails, authenticate explicitly with `gh`:
 
 ```
 gh auth login
 ```
 
 Answer: `GitHub.com` → protocol **HTTPS** → **Yes** to "Authenticate Git with your GitHub
-credentials" → log in with a web browser. This also gives `/land` what it needs to open
-pull requests.
+credentials" → log in with a web browser.
+
+**If `gh auth login` itself fails** — the interactive prompt does not render in every
+console, notably inside an editor's integrated terminal — use a token instead. Create a
+*classic* personal access token at <https://github.com/settings/tokens> with scopes `repo`,
+`read:org` and `gist` (the minimum `gh` documents), then:
+
+```
+# PowerShell, persisted for your user
+[Environment]::SetEnvironmentVariable("GH_TOKEN","<your token>","User")
+```
+
+Open a new terminal and check with `gh auth status`. Use a classic token rather than a
+fine-grained one: `gh`'s own help warns that fine-grained tokens behave confusingly when
+passed to `--with-token`.
 
 **Check:**
 
