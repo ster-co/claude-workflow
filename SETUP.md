@@ -131,9 +131,9 @@ session starts with `uvx` reachable. This is proved in step 5, not asserted here
 
 The plugin name `workflow-discipline` and marketplace name `ster-co` are quoted
 verbatim from `.claude-plugin/plugin.json` (`"name": "workflow-discipline"`) and
-`.claude-plugin/marketplace.json` (`"name": "`ster-co`"`) — read, not typed from
-memory. `ster-co/claude-workflow` is a placeholder: this repository is not published anywhere
-`/plugin marketplace add` can reach yet. Replace it with the real `owner/repo` once it is.
+`.claude-plugin/marketplace.json` (`"name": "ster-co"`) — read, not typed from
+memory. The repository is private to the `ster-co` organisation, so you need to be a member
+with read access for `/plugin marketplace add` to reach it.
 
 **Check:** `/plugin` lists `workflow-discipline@ster-co` and
 `superpowers@claude-plugins-official` as installed — the second arrived automatically from
