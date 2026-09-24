@@ -259,6 +259,91 @@ console.log('\nedit-gate.cjs — the home directory is not a gated repo');
 }
 
 // =============================================================================
+console.log("\nedit-gate.cjs — a /ship run's phase gates a source edit");
+// Bound to sessions of their own (SID_SHIP, SID_NORUN, SID_OTHER) rather than
+// SID, so a run created here can never leak into the reference-lookup
+// assertions above and below that assume SID has none bound to it.
+{
+  // run-state.cjs's CLI derives repoKey from process.cwd() AFTER spawnSync's
+  // own chdir, which macOS resolves through the /var -> /private/var symlink;
+  // edit-gate.cjs derives it from the literal `cwd` string in the hook's JSON
+  // payload, never chdir'd at all. The two must be fed the same string or
+  // they hash to different repoKeys for the same directory — a symlink
+  // artifact of $TMPDIR on this platform, not something either side of the
+  // real gate gets to choose. Realpath once here so both sides agree.
+  const REPO_RP = fs.realpathSync(REPO);
+  const RUN_STATE_BIN = path.join(HOOKS, 'run-state.cjs');
+  const rs = (args, { cwd = REPO_RP, session } = {}) => {
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: CONFIG };
+    if (session) env.CLAUDE_CODE_SESSION_ID = session; else delete env.CLAUDE_CODE_SESSION_ID;
+    const r = spawnSync('node', [RUN_STATE_BIN, ...args], { cwd, encoding: 'utf-8', env });
+    if (r.status !== 0) throw new Error(`run-state.cjs ${args.join(' ')} failed: ${r.stderr}`);
+    return r;
+  };
+  const markerFor = (session) => path.join(STATE, 'refs-checked', `${session}.json`);
+  const edit = (session, file, cwd = REPO_RP) =>
+    decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: file }, session, cwd)));
+
+  // The refs-checked marker is kept present for every session in this section
+  // on purpose: the phase check must fire regardless of it, so proving the
+  // blocked phases deny WITH the marker present is what proves the ordering,
+  // not an accident of a marker that happens to be missing.
+  const SID_SHIP = 'test-gates-ship-0001';
+  mark(markerFor(SID_SHIP));
+
+  for (const phase of ['awaiting-direction', 'planning', 'awaiting-approval']) {
+    rs(['start', '--feature', 'f-phase', '--phase', phase], { session: SID_SHIP });
+    check(`phase '${phase}' denies a source edit`,
+      edit(SID_SHIP, path.join(REPO_RP, 'src/thing.py')), 'deny');
+  }
+  // Restated explicitly: the run is still at 'planning' from the loop above,
+  // and the refs-checked marker has been present the whole time.
+  check("a blocked phase still denies a source edit with the refs-checked marker present (ordering)",
+    edit(SID_SHIP, path.join(REPO_RP, 'src/thing.py')), 'deny');
+
+  for (const phase of ['executing', 'landing']) {
+    rs(['start', '--feature', 'f-phase', '--phase', phase], { session: SID_SHIP });
+    check(`phase '${phase}' allows a source edit`,
+      edit(SID_SHIP, path.join(REPO_RP, 'src/thing.py')), 'allow');
+  }
+
+  rs(['start', '--feature', 'f-phase', '--phase', 'executing'], { session: SID_SHIP });
+  rs(['finish'], { session: SID_SHIP });
+  check('a finished run (finishedAt set) allows a source edit',
+    edit(SID_SHIP, path.join(REPO_RP, 'src/thing.py')), 'allow');
+
+  // The do-it-now case: /plan's "do it now" triage creates no run state at
+  // all, so a session with no pointer bound must be unaffected. Getting this
+  // wrong fires the gate on every ordinary edit.
+  const SID_NORUN = 'test-gates-norun-0001';
+  mark(markerFor(SID_NORUN));
+  check('no run bound to the session allows a source edit (the do-it-now case)',
+    edit(SID_NORUN, path.join(REPO_RP, 'src/thing.py')), 'allow');
+
+  // A run bound to a different repository must not block this one — proves
+  // the pointer's repoKey check (run-state.cjs's resolve) is honoured.
+  const OTHER_REPO = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gateother-')));
+  const SID_OTHER = 'test-gates-other-0001';
+  mark(markerFor(SID_OTHER));
+  rs(['start', '--feature', 'f-other', '--phase', 'awaiting-direction'], { cwd: OTHER_REPO, session: SID_OTHER });
+  check('a run bound to a different repo does not block this one',
+    edit(SID_OTHER, path.join(REPO_RP, 'src/thing.py')), 'allow');
+  try { fs.rmSync(OTHER_REPO, { recursive: true, force: true }); } catch {}
+
+  // Writing the plan document (or the brief file) during 'planning' is
+  // exactly the right thing to do, so only source files may be guarded.
+  rs(['start', '--feature', 'f-phase', '--phase', 'planning'], { session: SID_SHIP });
+  fs.mkdirSync(path.join(REPO_RP, 'docs', 'plans'), { recursive: true });
+  fs.writeFileSync(path.join(REPO_RP, 'docs', 'plans', 'brief.md'), '# plan\n');
+  check('a plan document under docs/plans is allowed during planning',
+    edit(SID_SHIP, path.join(REPO_RP, 'docs', 'plans', 'brief.md')), 'allow');
+
+  rm(markerFor(SID_SHIP));
+  rm(markerFor(SID_NORUN));
+  rm(markerFor(SID_OTHER));
+}
+
+// =============================================================================
 console.log('\ncommit-gate.cjs — read the diff before you commit');
 rm(diffMarker);
 const commit = (cmd, env = {}) => decision(run('gates/commit-gate.cjs', pre('Bash', { command: cmd }), env));

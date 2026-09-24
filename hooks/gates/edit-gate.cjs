@@ -21,7 +21,7 @@ const path = require('path');
 const fs = require('fs');
 const {
   markerPath, gatesDisabled, findGatedRoot, isSourceFile, bashWriteTargets,
-  deny, readStdin,
+  deny, readStdin, shipPhase,
 } = require('./gate-lib.cjs');
 
 function allow() { process.exit(0); }
@@ -40,11 +40,33 @@ function reason(targets, root) {
   );
 }
 
+// Phases where nothing has been agreed yet: no approach chosen, no plan
+// written, no plan approved. Editing source here is the exact failure this
+// gate exists to catch — measured on a real /ship run, where the agent
+// edited two source files during triage and no hook caught it.
+const BLOCKED_PHASES = new Set(['awaiting-direction', 'planning', 'awaiting-approval']);
+const WAITING_ON = {
+  'awaiting-direction': 'a chosen approach (Gate 1)',
+  planning: 'a written plan',
+  'awaiting-approval': 'plan approval (Gate 2)',
+};
+
+function phaseReason(phase, targets) {
+  const names = [...new Set(targets.map((t) => path.basename(t)))].slice(0, 5).join(', ');
+  return (
+    `A /ship run bound to this session is at phase '${phase}', waiting on ${WAITING_ON[phase]}. ` +
+    `${names} is a source file and nothing has been agreed yet, so editing it now is premature. ` +
+    `Answer the open gate with \`/ship\` and let the run reach 'executing' before editing source. ` +
+    `If this is genuinely a small fix that needs no run at all, say so and do it without starting ` +
+    `one — /plan's "do it now" triage creates no run state and this gate does not apply to it. ` +
+    `SKIP_CODE_GATES=1 overrides this gate if neither of those fits.`
+  );
+}
+
 readStdin((input) => {
   if (gatesDisabled()) return allow();
   const session = input?.session_id;
   if (!session) return allow();
-  if (fs.existsSync(markerPath('refs-checked', session))) return allow();
 
   const tool = input?.tool_name || '';
   const cwd = input?.cwd || process.cwd();
@@ -64,6 +86,18 @@ readStdin((input) => {
 
   const gated = targets.filter((t) => isSourceFile(t) && findGatedRoot(path.dirname(t)));
   if (!gated.length) return allow();
+
+  // Checked before the refs-checked marker, and unconditionally: a reference
+  // lookup says what depends on the code, not whether editing it now is
+  // legitimate. A run parked at 'planning' with a marker from an earlier,
+  // now-superseded edit must still be denied.
+  const phase = shipPhase(session, cwd);
+  if (BLOCKED_PHASES.has(phase)) {
+    deny(phaseReason(phase, gated));
+    return;
+  }
+
+  if (fs.existsSync(markerPath('refs-checked', session))) return allow();
 
   deny(reason(gated, findGatedRoot(path.dirname(gated[0]))));
 });

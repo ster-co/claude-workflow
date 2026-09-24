@@ -113,7 +113,11 @@ new idea, never as a gate answer nobody could have been waiting on.
 ## Start
 
 Run `/plan` on `$ARGUMENTS` and follow its triage exactly. `/plan` decides between
-three outcomes and you do not override it:
+three outcomes and you do not override it. Before doing anything else, print which one
+it picked — "do it now", "iterate in a browser", or "really plan" — so a silently-skipped
+triage is visible to the user; this is a reporting requirement only, not one a hook can
+check, since "do it now" is exactly the outcome that creates no run state for a hook to
+find:
 
 **One gate, and it is this one.** `/plan` has its own direction gate at its Step 2.5.
 Inside a `/ship` run **that stop does not fire** — `/ship` owns it, as Gate 1 below,

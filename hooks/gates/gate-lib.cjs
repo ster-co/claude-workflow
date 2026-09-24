@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { runFor } = require('../run-state.cjs');
 
 const SOURCE_EXT = new Set([
   '.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.go', '.rs',
@@ -61,6 +62,39 @@ function findGatedRoot(start) {
 
 function isSourceFile(p) {
   return SOURCE_EXT.has(path.extname(p).toLowerCase());
+}
+
+/**
+ * The phase of the `/ship` run bound to this session in this repo, or null
+ * when no run constrains this edit.
+ *
+ * `null` covers three cases a caller must NOT distinguish: no session, no
+ * pointer for it, or a pointer that names a run in a different repository —
+ * run-state.cjs's `resolve` already refuses a pointer whose `repoKey` does not
+ * match this `cwd`, which is what stops a run in one repo blocking edits in
+ * another, and `runFor` is the entry point that carries that check rather than
+ * a hand-rolled read of the pointer file. It also covers a run that has
+ * finished (`finishedAt` set): `run-state.cjs finish` already clears `phase`
+ * to null when it stamps `finishedAt`, but that is treated as authoritative
+ * here rather than assumed, so a state file written by an older run-state.cjs
+ * that stamped `finishedAt` without also clearing `phase` still reads as
+ * unconstrained.
+ *
+ * `/plan`'s "do it now" triage is the reason this must default open: it
+ * deliberately creates no run state for a small fix, so a session with
+ * nothing bound here must read exactly like one with a run parked at
+ * `executing` — both allowed.
+ */
+function shipPhase(session, cwd) {
+  if (!session) return null;
+  let state;
+  try {
+    state = runFor(cwd, session);
+  } catch {
+    return null;
+  }
+  if (!state || state.finishedAt) return null;
+  return state.phase || null;
 }
 
 function unquote(t) {
@@ -458,6 +492,6 @@ function readStdin(cb) {
 
 module.exports = {
   SOURCE_EXT, CONFIG_DIR, STATE_DIR, markerPath, gatesDisabled, findGatedRoot,
-  isSourceFile, bashWriteTargets, executableShell, deny, readStdin,
+  isSourceFile, bashWriteTargets, executableShell, deny, readStdin, shipPhase,
   planBody, planBodyHash, acceptedIds, reportFromTranscript, promptFromTranscript,
 };
