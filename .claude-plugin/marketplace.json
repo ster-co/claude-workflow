@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "klosoter-workflow",
+  "description": "klosoter's plan-gated Claude Code workflow, packaged as an installable plugin.",
+  "owner": {
+    "name": "klosoter"
+  },
+  "allowCrossMarketplaceDependenciesOn": ["claude-plugins-official"],
+  "plugins": [
+    {
+      "name": "workflow-discipline",
+      "source": "./",
+      "description": "Plan-gated workflow with an orchestrator loop (/ship, /plan, /execute, /land), enforcement hooks for edits, commits and verification, and Serena code intelligence."
+    }
+  ]
+}

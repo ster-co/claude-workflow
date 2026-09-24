@@ -1,0 +1,42 @@
+# Allowlist: ignore everything, then re-include only the authored machinery.
+# ~/.claude holds conversation transcripts (projects/, 2.1G), per-session keys
+# (sessions/*.key), plugin caches and file history. None of it is authored, all of
+# it is private, and some of it is secret — so the default is "not tracked" and
+# every tracked path is named below on purpose.
+/*
+
+!/.gitignore
+!/README.md
+!/SETUP.md
+!/CLAUDE.md
+!/settings.json
+!/.mcp.json
+
+!/.claude-plugin/
+!/commands/
+!/agents/
+!/hooks/
+!/skills/
+!/docs/
+!/prompts/
+!/bin/
+!/output-styles/
+
+# audit/ is not tracked: it held session research naming client repositories,
+# and this repository is published.
+
+# Vendored or machine-generated inside otherwise-tracked directories.
+/skills/synced/
+/skills/*/node_modules/
+
+# workflow-package/ carries its own .git; tracking it here would add a gitlink
+# pointing at a repository that is not this one.
+/workflow-package/
+
+# Secrets and per-machine state, restated as a denylist so a future "!" line
+# cannot accidentally re-include them.
+**/.credentials.json
+**/*.key
+**/*.pem
+**/.env
+**/.DS_Store
