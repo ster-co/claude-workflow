@@ -168,18 +168,29 @@ step 2's dependency declaration, not from a separate command.
 Both live at `~/.claude/` (`%USERPROFILE%\.claude\` on Windows). The operator of this
 repository has confirmed overwriting a colleague's own copies of these two files is fine.
 
+**You do not need to clone this repository.** Step 2's `/plugin marketplace add` already
+cloned it — a marketplace is fetched to `~/.claude/plugins/marketplaces/<marketplace-name>/`,
+and this marketplace is named `ster-co`, so the files are sitting at
+`~/.claude/plugins/marketplaces/ster-co/`. Copy from there:
+
 ```
 # macOS/Linux
-cp settings.json ~/.claude/settings.json
-cp CLAUDE.md ~/.claude/CLAUDE.md
+SRC=~/.claude/plugins/marketplaces/ster-co
+cp "$SRC/settings.json" ~/.claude/settings.json
+cp "$SRC/CLAUDE.md"     ~/.claude/CLAUDE.md
 
-# Windows
-copy settings.json %USERPROFILE%\.claude\settings.json
-copy CLAUDE.md %USERPROFILE%\.claude\CLAUDE.md
+# Windows (PowerShell)
+$src = "$env:USERPROFILE\.claude\plugins\marketplaces\ster-co"
+copy "$src\settings.json" "$env:USERPROFILE\.claude\settings.json"
+copy "$src\CLAUDE.md"     "$env:USERPROFILE\.claude\CLAUDE.md"
 ```
 
-(Run from a checkout of this repository, or with `settings.json`/`CLAUDE.md` replaced by
-their full paths.)
+**Check:** `ls ~/.claude/plugins/marketplaces/ster-co` lists `SETUP.md`, `settings.json` and
+`CLAUDE.md` among others. If that directory does not exist, step 2 did not complete — fix
+that before copying anything.
+
+If you would rather read the instructions from a checkout, cloning works too, but it is not
+required for any step here.
 
 **What each brings:**
 
