@@ -69,6 +69,26 @@ function tmpRepo(name, files = {}) {
   return d;
 }
 
+// The real git this machine already has on PATH, resolved once so the shim
+// below can hand every subcommand but one to it unchanged.
+const REAL_GIT = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['git'], { encoding: 'utf8' })
+  .trim().split('\n')[0];
+
+// A directory holding a `git` that answers `check-ignore` with `code` --
+// neither 0 (ignored) nor 1 (not ignored) -- and forwards every other
+// subcommand to the real git. Prepending it to a relay's PATH stands in for
+// git failing to answer the ignored-or-not question at all: a timeout, or a
+// fatal error such as running outside any repository, without this suite
+// waiting out a real one.
+function gitCheckIgnoreShim(code) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-shim-'));
+  trash.push(dir);
+  const script = `#!/bin/sh\nif [ "$1" = "check-ignore" ]; then exit ${code}; fi\nexec ${JSON.stringify(REAL_GIT)} "$@"\n`;
+  fs.writeFileSync(path.join(dir, 'git'), script);
+  fs.chmodSync(path.join(dir, 'git'), 0o755);
+  return dir;
+}
+
 // The language_servers: list a .serena/project.yml has, the way
 // repo-setup.cjs's own tests read it back.
 function serversIn(yml) {
@@ -93,9 +113,8 @@ function fakeCmd(logFile, extra = []) {
 // could possibly still be deciding whether to write .serena/project.yml.
 // Checking after the handshake instead (as the block above this one does)
 // only proves the file exists eventually; it cannot tell "written before
-// spawn" from "written after", which is the ordering BRIEF 7 requires ("the
-// config the SessionStart hook would write ... before the relay spawns a
-// server"). $1 is the repository root (the relay substitutes `{root}` before
+// spawn" from "written after", and the config must be on disk before the
+// relay spawns a server. $1 is the repository root (the relay substitutes `{root}` before
 // exec), so the wrapper can stat `$1/.serena/project.yml` for itself, with no
 // fixture edit needed.
 function fakeCmdRecordingConfig(logFile, markerFile) {
@@ -143,6 +162,12 @@ class Relay {
       cwd: repo,
       env: {
         ...process.env,
+        // Blanked by default: an operator's own shell may export this to opt
+        // a real session out of automatic repo setup (SETUP.md), and that
+        // must not leak into a relay this suite starts to test the setup
+        // itself. A test that means to exercise the opt-out passes it
+        // through `env`, which is spread after this and wins.
+        CLAUDE_NO_AUTO_REPO_SETUP: '',
         CLAUDE_CONFIG_DIR: CONFIG,
         CLAUDE_PROJECT_DIR: repo,
         SERENA_RELAY_SERVER_CMD: cmd,
@@ -1290,8 +1315,8 @@ async function main() {
   // A root with no .serena/project.yml gets one written, with every language
   // it actually has, before its server is ever spawned -- whether it is a
   // routed secondary target (a /ship worktree: no session ever starts there,
-  // so no SessionStart hook ever writes its config) or the session's own root
-  // (BRIEF 7). Left alone once the file exists at all, whatever it contains.
+  // so no SessionStart hook ever writes its config) or the session's own
+  // root. Left alone once the file exists at all, whatever it contains.
   console.log('\nserena-relay.cjs — a root with no .serena/project.yml gets the full language list before its server starts');
   {
     const files = { 'app/main.py': 'x = 1\n', 'web/app.ts': 'export const a = 1;\n' };
@@ -1377,7 +1402,7 @@ async function main() {
 
   // ---------------------------------------------------------------------------
   // ensureProjectConfig applies the SessionStart hook's own preconditions for
-  // writing a config (BRIEF 7), not only its detection and writing: an
+  // writing a config, not only its detection and writing: an
   // opt-out, and a command that will not even start. Writing the config
   // regardless would gate a repository with no way to satisfy the gate.
   console.log('\nserena-relay.cjs — a config is not written when the hook would not have written one either');
@@ -1419,6 +1444,27 @@ async function main() {
     check('...but no config was written for it (MUST-NOT)', fs.existsSync(ymlOptOut), false);
     L.close();
     check('relay L exits 0', (await L.waitExit()).code, 0);
+
+    // ensureProjectConfig only writes for a root hasProjectMarker calls a
+    // repository. A session's own root with neither `.git` nor an existing
+    // `.serena/project.yml` is still opened, with no --project flag at all
+    // (route's "own" case for exactly this root; see hasProjectMarker's own
+    // comment), and must get no config written for it, however many
+    // supported-language files it has.
+    const noMarker = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-nomarker-'));
+    trash.push(noMarker);
+    fs.writeFileSync(path.join(noMarker, 'main.py'), 'x = 1\n');
+    const ymlNoMarker = path.join(noMarker, '.serena', 'project.yml');
+    const logNoMarker = path.join(CONFIG, 'config-no-marker.log');
+    allLogs.push(logNoMarker);
+    const Q = new Relay(noMarker, fakeCmd(logNoMarker, ['--root', '{root}']));
+    await Q.handshake();
+    const echoQ = await Q.echo();
+    check('a root with neither .git nor .serena/project.yml still gets its own server',
+      echoQ.root, fs.realpathSync(noMarker));
+    check('...but no config was written for the root with no marker (MUST-NOT)', fs.existsSync(ymlNoMarker), false);
+    Q.close();
+    check('relay Q (no marker) exits 0', (await Q.waitExit()).code, 0);
   }
 
   // ---------------------------------------------------------------------------
@@ -1428,16 +1474,16 @@ async function main() {
   // config, or an error result get none.
   //
   // Isolated from the operator's own git configuration -- a global
-  // excludesFile or an XDG ~/.config/git/ignore entry for `.serena/` (this
-  // repository's own SETUP.md has colleagues add exactly that) would make
-  // every root look ignored regardless of the fixture, hiding the case under
-  // test entirely.
+  // excludesFile, an XDG ~/.config/git/ignore entry for `.serena/` (this
+  // repository's own SETUP.md has colleagues add exactly that), or the system
+  // gitconfig (`git config --system`) -- any of which would make every root
+  // look ignored regardless of the fixture, hiding the case under test entirely.
   console.log('\nserena-relay.cjs — a config written where .serena/ is not git-ignored gets a notice');
   {
     const files = { 'app/main.py': 'x = 1\n' };
     const xdgEmpty = fs.mkdtempSync(path.join(os.tmpdir(), 'xdg-empty-'));
     trash.push(xdgEmpty);
-    const gitIsolation = { GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgEmpty };
+    const gitIsolation = { GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgEmpty, GIT_CONFIG_NOSYSTEM: '1' };
 
     const notIgnored = tmpRepo('notice-not-ignored', files);
     const ymlNI = path.join(notIgnored, '.serena', 'project.yml');
@@ -1505,6 +1551,97 @@ async function main() {
       success.result && success.result.content.length, 2);
     P.close();
     check('relay P exits 0', (await P.waitExit()).code, 0);
+
+    // A tools/list reply lists tool schemas; the notice is a
+    // {type: "text"} content item, which only a tools/call result has
+    // anywhere to hold it (see forwardTo's isCall guard). The pending
+    // notice must still be there afterward, for the session's first
+    // tools/call.
+    const listTarget = tmpRepo('notice-not-list', files);
+    const ymlList = path.join(listTarget, '.serena', 'project.yml');
+    const logList = path.join(CONFIG, 'notice-not-list.log');
+    allLogs.push(logList);
+    const Q = new Relay(listTarget, fakeCmd(logList, ['--root', '{root}']), gitIsolation);
+    await Q.handshake();
+    const list = await Q.request('tools/list', {});
+    ok('the config was written before this first request answered', fs.existsSync(ymlList));
+    check('tools/list carries none of the notice text (MUST-NOT)',
+      JSON.stringify(list.result).includes(ymlList), false);
+    const echoQ = await Q.request('tools/call', { name: 'echo', arguments: {} });
+    check('the notice was still pending: the first tools/call carries it',
+      echoQ.result && echoQ.result.content.length, 2);
+    Q.close();
+    check('relay Q (tools/list) exits 0', (await Q.waitExit()).code, 0);
+
+    // Two tools/call requests sent without waiting on either reply first,
+    // so both are in flight together. The check below asserts that exactly
+    // one of the two replies carries the notice content, never both and
+    // never neither, on this one run of the race -- evidence that emit's
+    // read-then-clear of pendingNotice (forwardTo) resolved cleanly here,
+    // not a proof that every interleaving of the read and the clear must.
+    const concTarget = tmpRepo('notice-concurrent', files);
+    const ymlConc = path.join(concTarget, '.serena', 'project.yml');
+    const logConc = path.join(CONFIG, 'notice-concurrent.log');
+    allLogs.push(logConc);
+    const R = new Relay(concTarget, fakeCmd(logConc, ['--root', '{root}']), gitIsolation);
+    await R.handshake();
+    const [concFirst, concSecond] = await Promise.all([
+      R.request('tools/call', { name: 'echo', arguments: {} }),
+      R.request('tools/call', { name: 'echo', arguments: {} }),
+    ]);
+    ok('the config was written for the concurrent-calls target', fs.existsSync(ymlConc));
+    const concLengths = [concFirst, concSecond]
+      .map((r) => (r.result && r.result.content ? r.result.content.length : null)).sort();
+    check('exactly one of the two concurrent replies carries the notice, never both or neither',
+      concLengths, [1, 2]);
+    R.close();
+    check('relay R (concurrent calls) exits 0', (await R.waitExit()).code, 0);
+
+    // A call whose relative_path names a second repository is routed to that
+    // repository's server and carries that repository's own notice; the
+    // session's root, with no supported-language file, has none to give.
+    const routeOwn = tmpRepo('notice-route-own');
+    const routeTarget = tmpRepo('notice-route-target', files);
+    const ymlRouteTarget = path.join(routeTarget, '.serena', 'project.yml');
+    const logRoute = path.join(CONFIG, 'notice-route.log');
+    allLogs.push(logRoute);
+    const S = new Relay(routeOwn, fakeCmd(logRoute, ['--root', '{root}']), gitIsolation);
+    await S.handshake();
+    const ownCall = await S.request('tools/call', { name: 'echo', arguments: {} });
+    check('the session\'s own root, where nothing was written, gets no notice',
+      ownCall.result && ownCall.result.content.length, 1);
+    const routedCall = await S.request('tools/call',
+      { name: 'echo', arguments: { relative_path: path.join(routeTarget, 'x.cjs') } });
+    ok('the config was written for the routed target', fs.existsSync(ymlRouteTarget));
+    check('the call routed to the second target carries that target\'s own notice',
+      routedCall.result && routedCall.result.content.length, 2);
+    const routedNotice = routedCall.result.content[1];
+    ok('the notice names the routed target\'s own file, not the session\'s own root',
+      routedNotice.type === 'text' && routedNotice.text.includes(ymlRouteTarget));
+    S.close();
+    check('relay S exits 0', (await S.waitExit()).code, 0);
+
+    // serenaDirIgnored answers true, false, or null when git could not tell
+    // (a timeout, or any exit status other than 0 or 1 from `check-ignore`).
+    // The notice fires only on a definite false (spawnServer); a target
+    // where git could not answer must get none, because treating null as
+    // false would tell the operator a config is untracked when it might in
+    // fact be ignored.
+    const unknown = tmpRepo('notice-unknown', files);
+    const ymlUnknown = path.join(unknown, '.serena', 'project.yml');
+    const logUnknown = path.join(CONFIG, 'notice-unknown.log');
+    allLogs.push(logUnknown);
+    const shimDir = gitCheckIgnoreShim(128);
+    const T = new Relay(unknown, fakeCmd(logUnknown, ['--root', '{root}']), {
+      ...gitIsolation, PATH: `${shimDir}${path.delimiter}${process.env.PATH}`,
+    });
+    await T.handshake();
+    const echoT = await T.request('tools/call', { name: 'echo', arguments: {} });
+    ok('the config was written even though git could not answer check-ignore', fs.existsSync(ymlUnknown));
+    check('no notice when git could not tell whether .serena/ is ignored (MUST-NOT)',
+      echoT.result && echoT.result.content.length, 1);
+    T.close();
+    check('relay T exits 0', (await T.waitExit()).code, 0);
   }
 
   // ---------------------------------------------------------------------------

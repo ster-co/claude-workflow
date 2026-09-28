@@ -80,6 +80,10 @@ condition, so the session needs no steering.
 - Money/scope guard: <endpoints or commands that bill or mutate shared state, and the
   sanctioned stub for testing those paths>
 - Never touch: <paths, sibling repos, consumed packages>
+- If this repo's hooks or tools read a config directory from the environment at load time
+  (as `~/.claude`'s hooks read `CLAUDE_CONFIG_DIR`), any probe or test must set that variable
+  before requiring or spawning the module, never after. Cost: a reviewer's probe that set it
+  late wrote into the live `~/.claude/state`.
 - Evidence standard: paste the literal terminal output — the command, its output, and the
   exit code from `echo $?`. Not a summary, not "it passed". A test counts only if you
   sabotage what it guards, see red, and restore.
@@ -114,6 +118,10 @@ database or emulator, a migration, a deploy, or a browser check>
   iterating in one session instead of writing a brief.
 - **Name the task, not the tools.** Openers naming superpowers/subagents/MCP servers land 1.79
   commits per hour; openers naming a task land 2.27.
+- **A wording or cleanup brief states the rule once and carries the complete list of lines to
+  change, produced before briefing, never example phrases.** It owns every file on its list.
+  Cost: gate-followups BRIEF 4, rejected twice with one leftover phrase per round, and one
+  file not owned.
 
 ## The opener to print
 

@@ -5,8 +5,8 @@
 // Why this is automatic. `bin/claude-repo-setup.sh` has existed since
 // 2026-09-21, is idempotent, and detects the languages itself — and nothing ever
 // ran it, which is why verify-all.cjs ends with a list of repositories printed as
-// "NOT gated". Serena ships python-only and reports every other language as
-// *ignored* rather than failing, so an unconfigured repository does not announce
+// "NOT gated". Serena autogenerates a config with only the dominant language
+// and reports every other language as *ignored* rather than failing, so an unconfigured repository does not announce
 // itself: it answers JS/TS questions with nothing, and the gates that key on
 // `.serena/project.yml` stay switched off. A setup step nobody runs is the same
 // as no setup step.
@@ -157,14 +157,21 @@ function uvxOnPath() {
 // with no global excludesFile entry for `.serena/` shows it as untracked,
 // so this is checked with `git check-ignore` rather than assumed the way the
 // session-start message used to.
+//
+// Three-valued. true and false are `check-ignore -q`'s own answers (exit 0:
+// ignored, exit 1: not ignored). null means git gave neither answer: the 5 s
+// timeout fired, git exited with another status (128 for a fatal error such
+// as a directory outside any repository), or git could not be started. The
+// SessionStart message says on null that it could not tell; the relay sends
+// its notice only on false.
 function serenaDirIgnored(root) {
   try {
     execFileSync('git', ['check-ignore', '-q', path.join(root, '.serena')], {
       cwd: root, stdio: 'ignore', timeout: 5000,
     });
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    return e.status === 1 ? false : null;
   }
 }
 
@@ -436,9 +443,11 @@ if (require.main === module) {
     // out-of-band instruction trips prompt-injection defences and gets shown to
     // the operator instead of used.
     const ignored = serenaDirIgnored(root);
-    const gitStatusLine = ignored
+    const gitStatusLine = ignored === true
       ? '.serena/ is gitignored here, so this added nothing that git status reports.'
-      : `.serena/ is not gitignored here, so ${path.relative(root, yml)} will show as untracked in git status unless you add .serena/ to .gitignore or your global excludes.`;
+      : ignored === false
+        ? `.serena/ is not gitignored here, so ${path.relative(root, yml)} will show as untracked in git status unless you add .serena/ to .gitignore or your global excludes.`
+        : `Whether .serena/ is gitignored here could not be determined, so ${path.relative(root, yml)} may show as untracked in git status.`;
     const serverLine = {
       stopped: 'Serena reads a project\'s configuration once when its server starts, so this'
         + ' repository\'s shared Serena server was stopped; this session\'s next Serena call'

@@ -17,7 +17,7 @@
 // exists, not the one about to be made.
 const fs = require('fs');
 const path = require('path');
-const { markerPath, executableShell, readStdin } = require('./gate-lib.cjs');
+const { markerPath, executableShellViews, readStdin } = require('./gate-lib.cjs');
 
 // Global flags sit between `git` and the subcommand and some take a value —
 // the same parsing the commit gate needs, for the same reason.
@@ -44,7 +44,9 @@ readStdin((input) => {
 
   // Quoted strings are data, not commands: a reminder that merely says
   // "run git diff first" is not a diff.
-  if (!ranDiff(executableShell(input?.tool_input?.command || ''))) process.exit(0);
+  // The single-quotes-first reading alone: this records a positive marker, so
+  // a second reading that shows more text is the unsafe direction here.
+  if (!ranDiff(executableShellViews(input?.tool_input?.command || '')[0])) process.exit(0);
 
   const m = markerPath('diff-reviewed', session);
   try {

@@ -57,8 +57,18 @@ function mainCheckoutRoot(dir) {
     // read as ungated. --path-format=absolute makes git do that resolution
     // itself, from the directory it is actually standing in, instead of this
     // function redoing it against a path that may not match.
+    // findGatedRoot calls this as a fallback once its own walk up from
+    // `start` finds no `.serena/project.yml`, so `dir` routinely names a
+    // directory outside any git working tree entirely -- there `git
+    // rev-parse` exits non-zero with "fatal: not a git repository ...".
+    // execFileSync's default stdio would inherit that message onto THIS
+    // process's own stderr in addition to attaching it to the thrown error;
+    // the stdio option here discards stderr instead, the same way
+    // repoIdentity's own execFileSync in refs-record.cjs already does.
+    // Nothing here reads stderr on failure (the catch below returns null
+    // unconditionally), so discarding it costs nothing.
     out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-      { cwd: dir, encoding: 'utf8', timeout: 5000 }).trim();
+      { cwd: dir, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch { return null; }
   if (!out) return null;
   return path.basename(out) === '.git' ? path.dirname(out) : out;
@@ -152,15 +162,32 @@ function stripHeredocBodies(cmd) {
  * JSON payload being piped to a script — is not that command. Both gates fired on
  * exactly that before this existed.
  */
-function executableShell(command) {
-  return stripHeredocBodies(command)
+function executableShellViews(command) {
+  const text = stripHeredocBodies(command)
     // Backslash-escaped quotes are literal characters, not delimiters. Leaving them
     // in mis-pairs the strippers below and exposes the inside of a JSON payload as
     // if it were shell — which is how this gate blocked a command that only *named*
     // `git commit` inside a quoted argument.
-    .replace(/\\["']/g, '')
-    .replace(/'[^']*'/g, "''")
-    .replace(/"[^"]*"/g, '""');
+    .replace(/\\["']/g, '');
+  const SINGLE = [/'[^']*'/g, "''"];
+  const DOUBLE = [/"[^"]*"/g, '""'];
+  const blank = (first, second) => text.replace(...first).replace(...second);
+  // Two readings, one per stripping order. Blanking single-quoted spans first
+  // pairs an apostrophe inside a double-quoted word (`"it's"`) with the next
+  // `'` anywhere later, and blanks every command in between; blanking
+  // double-quoted spans first reads that command correctly, and has the mirror
+  // weakness for a `"` inside single quotes. A gate that denies when EITHER
+  // reading shows a command sees everything the single-first reading alone
+  // saw, plus what it hid.
+  return [blank(SINGLE, DOUBLE), blank(DOUBLE, SINGLE)];
+}
+
+// Both readings joined by a newline, which tokenize and gitSubcommandIs treat
+// as a command separator, so each reading's commands stay separate. The
+// redirect and tee patterns in bashWriteTargets can cross a newline, so it
+// walks the two readings one at a time instead of using this.
+function executableShell(command) {
+  return executableShellViews(command).join('\n');
 }
 
 // Shell operators separate commands whether or not they are spelled with spaces
@@ -248,7 +275,7 @@ function isCleanLit(raw) {
  * isCleanLit (correctly) refuses it there for its own quote characters.
  * `'...'` of any content is trusted unconditionally: POSIX single quotes
  * admit no escaping at all, so a balanced pair can only ever hold literal
- * text -- the same fact `stripSafeQuotes` above relies on for a
+ * text -- the same fact `stripSafeQuotes` below relies on for a
  * single-quoted span. `"..."` is trusted only when its content has none of
  * `$`, backtick or `\`, the three characters with any special meaning inside
  * double quotes (a substitution or an escape could otherwise be hiding in
@@ -669,7 +696,12 @@ function gitRunDirs(command, cwd) {
   // than relying on this function to hand it one un-dereferenced.
   const start = realOrSelf(path.resolve(cwd));
   const segments = splitSegments(gitDirTokens(command));
-  if (!isSimpleCommand(command)) return [...universalFallback(segments, start)];
+  // The fallback candidate set also takes a whole, clean quoted literal
+  // (`git -C "<dir>"`, `cd "<dir>"`), as bashWriteTargets does: adding a
+  // candidate can only add a denial. The strict per-`git` grammar below still
+  // trusts unquoted literals only.
+  const FALLBACK_OPTS = { acceptQuotedLit: true, acceptCdFlags: true };
+  if (!isSimpleCommand(command)) return [...universalFallback(segments, start, FALLBACK_OPTS)];
   let fallback = null;
   const results = [];
 
@@ -735,7 +767,7 @@ function gitRunDirs(command, cwd) {
       }
 
       if (eligible) { results.push(base); continue; }
-      if (!fallback) fallback = universalFallback(segments, start);
+      if (!fallback) fallback = universalFallback(segments, start, FALLBACK_OPTS);
       for (const d of fallback) results.push(d);
     }
   }
@@ -798,8 +830,9 @@ function bashWriteTargets(command, cwd) {
   };
 
   // Quoted strings are data, not commands: a JSON payload containing `sed -i`
-  // is not a `sed -i` invocation.
-  const shell = executableShell(command);
+  // is not a `sed -i` invocation. Each stripping order is read separately and
+  // the targets merged (see executableShellViews).
+  for (const shell of executableShellViews(command)) {
 
   // redirects:  > file   >> file
   for (const m of shell.matchAll(/(?<![0-9&])>>?\s*("[^"]+"|'[^']+'|[^\s;|&<>()]+)/g)) add(m[1]);
@@ -824,6 +857,7 @@ function bashWriteTargets(command, cwd) {
       const t = unquote(m[1]);
       if (isSourceFile(t)) add(m[1]);
     }
+  }
   }
 
   // PowerShell fallback: on Windows, Claude Code runs PowerShell instead of Bash
@@ -976,10 +1010,9 @@ function bashWriteTargets(command, cwd) {
 //  - The POSIX side has no notion of a `#` comment at all: `executableShell`
 //    only strips heredoc bodies and quoted strings, so `# echo x > app.py` —
 //    a line that runs nothing — still matches the redirect scan and denies.
-//    That is a fail-closed nuisance, not a fail-open: the reverse of the
-//    PowerShell defect this section used to carry for the same character,
-//    which was fixed by making comment-handling part of the quote-aware scan
-//    above instead of a pre-pass blind to quoting.
+//    That is a fail-closed nuisance, not a fail-open. The PowerShell side
+//    handles `#` inside its quote-aware scan above, so a quoted `#` there is
+//    never mistaken for a comment.
 //  - A non-literal `cd` (`cd "$X"`, `cd $(pwd)/x`), a subshell's own `cd`
 //    (`( cd U ) && ...`), `pushd`, and PowerShell's `Set-Location` / `sl` /
 //    `Push-Location` are none of them candidate bases: `universalFallback`
@@ -1160,7 +1193,7 @@ function readStdin(cb) {
 
 module.exports = {
   SOURCE_EXT, CONFIG_DIR, STATE_DIR, markerPath, gatesDisabled, findGatedRoot,
-  isSourceFile, bashWriteTargets, executableShell, deny, readStdin, shipPhase,
+  isSourceFile, bashWriteTargets, executableShell, executableShellViews, deny, readStdin, shipPhase,
   planBody, planBodyHash, acceptedIds, reportFromTranscript, promptFromTranscript,
   SEPARATOR, tokenize, VALUE_FLAGS, gitAt, gitSubcommandIs, gitRunDirs,
 };

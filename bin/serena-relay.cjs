@@ -173,8 +173,8 @@ function hasProjectMarker(dir) {
 // `git rev-parse --show-toplevel` succeeds, and quits without writing
 // anything otherwise. A directory with neither marker is the one case route()
 // still opens as `own` (the session's own directory, never a routed target),
-// and it is meant to reach Serena with no --project flag at all, unconfigured
-// the way it always has been; this must not start giving it one.
+// and it reaches Serena with no --project flag and no config; this must not
+// give it one.
 //
 // Returns `{ yml, servers }` when it wrote the file, `null` otherwise -- so
 // spawnServer knows whether there is anything worth telling a client about
@@ -418,13 +418,16 @@ class Target {
    * error ensureServer throws points at this file. Each attempt begins with a
    * separator line naming it.
    *
-   * When ensureProjectConfig wrote a file here, and this root's `.serena/` is
-   * not git-ignored, this sets pendingNotice: the config it just wrote will
-   * otherwise show as untracked with nothing but the log line above saying
-   * so. serenaDirIgnored runs `git check-ignore`, bounded by its own 5 s
-   * timeout, and is called only on that write -- never on every spawn -- so
-   * it costs nothing on the far more common path of a root that already has
-   * a config.
+   * When ensureProjectConfig wrote a file here and serenaDirIgnored answers
+   * false (`.serena/` is not git-ignored), this sets pendingNotice: the
+   * config it just wrote will otherwise show as untracked with nothing but
+   * the log line above saying so. On true there is nothing to report, and on
+   * null (git could not answer: a timeout or a fatal error) the relay cannot
+   * tell whether the file shows as untracked, so it sends no notice.
+   * serenaDirIgnored runs
+   * `git check-ignore`, bounded by its own 5 s timeout, and is called only on
+   * that write -- never on every spawn -- so it costs nothing on the far more
+   * common path of a root that already has a config.
    */
   spawnServer(port, previous, attempt) {
     // A session can outlive its directory: a /ship worktree removed while a
@@ -440,7 +443,7 @@ class Target {
     // for the gates to key on -- and still write it before spawn(), so the
     // config is on disk before Serena reads it (see ensureProjectConfig).
     const wrote = ensureProjectConfig(this.root, cmd);
-    if (wrote && !serenaDirIgnored(this.root)) {
+    if (wrote && serenaDirIgnored(this.root) === false) {
       this.pendingNotice = `serena-relay wrote ${wrote.yml} (languages: ${wrote.servers.join(', ')}). `
         + `.serena/ is not git-ignored in ${this.root}, so it shows as untracked; add `
         + '`.serena/` to that repository\'s .gitignore or to your global excludes.';
@@ -1065,23 +1068,11 @@ function route(msg) {
 }
 
 /**
- * Forwards one client message, sending it to the server at most once. Two
- * failures prove the server did not run it, and only those reconnect --
- * re-finding or respawning the server and replaying initialize -- and retry
- * once: a refused connection (neverSent), and a 404 (the server no longer
- * knows the session: it was restarted, or is not the one the session was
- * opened on), which the server sends instead of running the request. Any
- * other broken connection, before the reply's headers or after them, is not
- * retried: the server may have read the request and run the tool, and
- * running an edit twice is worse than reporting a failure. Anything still
- * failing is answered with exactly one JSON-RPC error, so the client is never
- * left waiting on a request id that no reply will come for -- unless a
- * response for that id already reached the client, which must not get a
- * second one.
- *
- * The target this message goes to, and what is sent there, come from route:
- * the client's message, or a copy with relative_path rewritten for another
- * repository. A request is recorded in inFlight until it is done.
+ * Forwards one client message to its target. The target, and what is sent
+ * there, come from route: the client's message, or a copy with relative_path
+ * rewritten for another repository. A request is recorded in inFlight until
+ * it is done. The sending itself -- at most once, with its retry rules --
+ * is forwardTo's.
  */
 async function forward(msg) {
   const { t, sent } = route(msg);
@@ -1097,7 +1088,21 @@ async function forward(msg) {
   }
 }
 
-// forward's work on one target; everything here applies per target alike.
+/**
+ * Sends one message to one target, at most once. Two failures prove the
+ * server did not run it, and only those reconnect -- re-finding or
+ * respawning the server and replaying initialize -- and retry once: a refused
+ * connection (neverSent), and a 404 (the server no longer knows the session:
+ * it was restarted, or is not the one the session was opened on), which the
+ * server sends instead of running the request. Any other broken connection,
+ * before the reply's headers or after them, is not retried: the server may
+ * have read the request and run the tool, and running an edit twice is worse
+ * than reporting a failure. Anything still failing is answered with exactly
+ * one JSON-RPC error, so the client is never left waiting on a request id
+ * that no reply will come for -- unless a response for that id already
+ * reached the client, which must not get a second one. Everything here
+ * applies per target alike.
+ */
 async function forwardTo(t, msg, sent) {
   const isInit = !!msg && msg.method === 'initialize';
   const isList = isRequest(msg) && msg.method === 'tools/list';

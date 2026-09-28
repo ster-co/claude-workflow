@@ -112,6 +112,8 @@ check('a commit staging no plan file is never policed', commit(), 'allow');
 stageOnly(PLAN);
 clearMarkers();
 check('git status is not a commit', commit('git status --short'), 'allow');
+check('a commit after an apostrophe in double quotes is still a commit',
+  commit(`echo "it's"; git commit -m x; echo 'ok'`), 'deny');
 check('the words "git commit" in a quoted string are not a commit',
   commit('echo "remember to git commit" >> notes.md'), 'allow');
 check('global flags with values do not smuggle a plan commit past',
@@ -244,6 +246,12 @@ check('a clean audit of the twin does not clear the plan -C points at',
     `git -C ${REPO} add docs/plans/2026-09-22-thing.md && git -C ${REPO} commit -m x`), 'deny');
 check('and the audited twin in the working directory still commits',
   commitFrom(ELSEWHERE, 'git add docs/plans/2026-09-22-thing.md && git commit -m x'), 'allow');
+// A quoted -C literal is a candidate directory too: the plan staged in REPO
+// is unaudited, so committing it from elsewhere through `-C "<REPO>"` is denied.
+stageOnly(PLAN);
+check('a quoted -C naming the repo with an unaudited plan is denied',
+  commitFrom(ELSEWHERE, `git -C "${REPO}" commit -m x`), 'deny');
+git('reset', '-q');
 try { fs.rmSync(ELSEWHERE, { recursive: true, force: true }); } catch {}
 
 // `git diff --cached --name-only` always prints paths relative to the repo
@@ -1364,6 +1372,122 @@ console.log('\nplan-gate.cjs — BRIEF 12 round 2: an extra candidate must name 
 }
 
 // =============================================================================
+// A session directory that is a symlink onto the repository gives one staged
+// plan several spellings: the session's typed path, the physically resolved
+// path, and, where the platform tmp dir is itself a symlink (macOS), the
+// typed form of the resolved path. With no marker under any of them, the
+// denial lists every spelling the lookup tried, so an operator can compare
+// them with the `Plan:` path the audit recorded.
+console.log('\nplan-gate.cjs — the denial names every path form it looked the marker up under');
+{
+  const REPO_T = fs.mkdtempSync(path.join(os.tmpdir(), 'plantwocand-'));
+  const gitT = (...args) => execFileSync('git', args, { cwd: REPO_T, encoding: 'utf8' });
+  gitT('init', '-q', '.'); gitT('config', 'user.email', 't@t'); gitT('config', 'user.name', 't');
+  fs.mkdirSync(path.join(REPO_T, 'docs', 'plans'), { recursive: true });
+  const PLAN_T = path.join(REPO_T, 'docs', 'plans', 'twocand.md');
+  fs.writeFileSync(PLAN_T, '# two-candidate plan\n');
+  gitT('add', 'docs/plans/twocand.md');
+
+  // SESSION is a symlink onto REPO_T itself, so typedRootFor returns SESSION
+  // as the typed root and the plan gets a typed candidate beside the
+  // physically resolved one.
+  const SESSION = path.join(os.tmpdir(), `plantwocand-session-${process.pid}-${Date.now()}`);
+  fs.symlinkSync(REPO_T, SESSION, 'dir');
+
+  clearMarkers();
+  const out = run('gates/plan-gate.cjs', {
+    hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: { command: 'git commit -m x' }, session_id: 's1', cwd: SESSION,
+  }).out;
+  const reason = out?.hookSpecificOutput?.permissionDecisionReason || '';
+
+  const resolvedForm = fs.realpathSync(PLAN_T);
+  const typedForm = path.join(SESSION, 'docs', 'plans', 'twocand.md');
+  check('the typed and the physically resolved spelling of the plan differ',
+    resolvedForm !== typedForm, true);
+  check('the denial names the physically-resolved path it checked',
+    reason.includes(resolvedForm), true);
+  check("and the session's own typed spelling of the same file, reached through the symlink",
+    reason.includes(typedForm), true);
+
+  try { fs.rmSync(REPO_T, { recursive: true, force: true }); } catch {}
+  try { fs.unlinkSync(SESSION); } catch {}
+}
+
+// =============================================================================
+// `cd W && git add REL && git commit` is not the `(cd LIT &&)* git ...` shape
+// gitRunDirs trusts (the `git add` segment is not a `cd LIT`), so the commit
+// has two candidate directories: the session directory and W. willStage
+// resolves the same relative `git add` argument against each, so one plan
+// entry names W's file and another names the same relative path under the
+// session directory, where the shell never staged anything. The denial lists
+// each path with whether it exists, and names no staging command: the gate
+// cannot tell which candidate directory the shell uses.
+console.log('\nplan-gate.cjs — a relative git add after a cd: the denial lists both directories\' paths and suggests no staging command');
+{
+  const REPO_W = fs.mkdtempSync(path.join(os.tmpdir(), 'planphantom-'));
+  const gitW = (...args) => execFileSync('git', args, { cwd: REPO_W, encoding: 'utf8' });
+  gitW('init', '-q', '.'); gitW('config', 'user.email', 't@t'); gitW('config', 'user.name', 't');
+  fs.mkdirSync(path.join(REPO_W, 'docs', 'plans'), { recursive: true });
+  const PLAN_W = path.join(REPO_W, 'docs', 'plans', 'phantom.md');
+  fs.writeFileSync(PLAN_W, '# phantom-case plan\n');
+  const cmd = `cd ${REPO_W} && git add docs/plans/phantom.md && git commit -m x`;
+  const deny = () => run('gates/plan-gate.cjs', {
+    hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: { command: cmd }, session_id: 's1', cwd: REPO,
+  }).out?.hookSpecificOutput?.permissionDecisionReason || '';
+  const inSession = path.join(fs.realpathSync(REPO), 'docs', 'plans', 'phantom.md');
+  const inW = fs.realpathSync(PLAN_W);
+  const noStagingCommand = (reason) => !/git (-C \S+ )?add|git -C/.test(reason);
+
+  // Neither directory's copy audited; the session directory has no copy.
+  clearMarkers();
+  git('reset', '-q');
+  let reason = deny();
+  check('both candidate paths appear in the denial',
+    reason.includes(inSession) && reason.includes(inW), true);
+  check("the session directory's path is marked as not existing",
+    reason.includes(`${inSession} (no such file)`), true);
+  check("W's path is marked as existing", reason.includes(`${inW} (exists)`), true);
+  check('the denial names no staging command', noStagingCommand(reason), true);
+
+  // W's plan audited CLEAN, and the session directory has its own copy of the
+  // same relative path: only the session directory's entry is denied, and
+  // the denial must not steer the operator into staging that copy.
+  clearMarkers();
+  record({ cwd: REPO_W, tool_response: `## Audit Verdict\nCLEAN\nPlan: ${PLAN_W}` });
+  fs.writeFileSync(path.join(REPO, 'docs', 'plans', 'phantom.md'), '# the session directory\'s own copy\n');
+  reason = deny();
+  check("with W's plan audited, the denial names only the session directory's path",
+    reason.includes(inSession) && !reason.includes(inW), true);
+  check("the session directory's own copy is marked as existing",
+    reason.includes(`${inSession} (exists)`), true);
+  check('and the denial still names no staging command', noStagingCommand(reason), true);
+
+  try { fs.unlinkSync(path.join(REPO, 'docs', 'plans', 'phantom.md')); } catch {}
+  try { fs.rmSync(REPO_W, { recursive: true, force: true }); } catch {}
+}
+
+// =============================================================================
+// A marker whose hash no longer matches the plan: the "edited since its
+// audit" denial carries the same path list as "never audited".
+console.log('\nplan-gate.cjs — the edited-since-its-audit denial names the paths it checked');
+{
+  clearMarkers();
+  stageOnly(PLAN);
+  record();
+  fs.writeFileSync(PLAN, '# thing, edited after its audit\n');
+  git('add', PLAN);
+  const reason = run('gates/plan-gate.cjs', {
+    hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: { command: 'git commit -m x' }, session_id: 's1', cwd: REPO,
+  }).out?.hookSpecificOutput?.permissionDecisionReason || '';
+  check('the denial says the plan was edited since its audit', /edited since its audit/.test(reason), true);
+  check('and names the path it checked', reason.includes(`${fs.realpathSync(PLAN)} (exists)`), true);
+  fs.writeFileSync(PLAN, '# thing\n');
+  git('reset', '-q');
+}
+
 // Found live 2026-09-27: every lane runs in its own worktree, and a landing
 // merges `origin/develop`, which brings in plans other lanes audited and
 // committed from THEIR worktree paths. Markers are keyed by absolute path, so

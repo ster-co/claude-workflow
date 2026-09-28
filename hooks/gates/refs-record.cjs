@@ -120,9 +120,8 @@ function sessionRoot(cwd) {
 // rewritten onto the main checkout.
 //
 // Outside git, or on any git failure (a plain directory, a repo whose `.git`
-// this process cannot read), the identity is just the realpath itself -- the
-// same value `findGatedRoot`'s caller already had before this function
-// existed, so an ungated-of-git repository's behaviour is unchanged.
+// this process cannot read), the identity is the realpath of the gated root
+// itself: with no git, there is no main checkout to map it onto.
 function repoIdentity(gatedRoot) {
   const real = realpathOr(path.resolve(gatedRoot));
   let out;
@@ -228,7 +227,7 @@ function identityRecorded(markerFile, cwd, identity) {
 // between), and an unvalidated `../../settings` or `..` there reaches outside
 // the per-session marker/identity directory entirely. A session that fails
 // this is treated exactly like no session at all: nothing is read or written
-// for it, the same as the `if (!session)` branch just above always meant.
+// for it, as in the `if (!session)` check below.
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 module.exports = { lookupIdentity, sessionIdentity, identityRecorded, repoIdentity, identityFileName, realpathOr };

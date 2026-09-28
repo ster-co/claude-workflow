@@ -121,6 +121,13 @@ const gitMain = (...args) => execFileSync('git', args, { cwd: GATED_MAIN, encodi
 gitMain('init', '-q', '.');
 gitMain('config', 'user.email', 't@t');
 gitMain('config', 'user.name', 't');
+// `.serena/` is excluded through this repository's OWN `.git/info/exclude`
+// rather than depending on the operator's global excludes file: `git add .`
+// below must never actually commit `.serena/project.yml`, or a worktree of
+// this checkout starts life with that directory already present, and the
+// WORKTREE_OWN fixture's own `mkdirSync('.serena')` below fails with EEXIST
+// the moment HOME points somewhere with no global excludes for it.
+fs.appendFileSync(path.join(GATED_MAIN, '.git', 'info', 'exclude'), '.serena/\n');
 fs.mkdirSync(path.join(GATED_MAIN, '.serena'));
 fs.writeFileSync(path.join(GATED_MAIN, '.serena', 'project.yml'), 'project_name: "gated-main"\n');
 fs.writeFileSync(path.join(GATED_MAIN, 'f.txt'), 'x\n');
@@ -222,6 +229,13 @@ check('a redirect into a source file is denied', bash(`echo x > ${REPO}/src/thin
 check('reading a source file is allowed', bash(`cat ${REPO}/src/thing.py`), 'allow');
 check('grepping is allowed', bash(`grep -rn thing ${REPO}/src`), 'allow');
 check('running the tests is allowed', bash('pytest -q'), 'allow');
+// An apostrophe inside double quotes pairs with the next single quote when
+// single-quoted spans are blanked first; the gate also reads the command with
+// double-quoted spans blanked first, so the write between them stays visible.
+check('a redirect after an apostrophe in double quotes is still seen',
+  bash(`echo "it's"; echo x > ${REPO}/src/thing.py; echo 'done'`), 'deny');
+check('sed -i after an apostrophe in double quotes is still seen',
+  bash(`echo "it's" && sed -i '' 's/a/b/' ${REPO}/src/thing.py`), 'deny');
 // Prose that merely names a command is not that command — the old gates fired
 // on exactly this before the quoted-string stripper existed.
 check('a heredoc that only mentions a .py path is allowed',
@@ -477,10 +491,16 @@ check('global flags with values do not smuggle a commit past', commit('git -c us
 check('git -C dir commit is still a commit', commit(`git -C ${REPO} commit -m x`), 'deny');
 check('a commit in an ungated repo is allowed',
   decision(run('gates/commit-gate.cjs', pre('Bash', { command: 'git commit -m x' }, SID, PLAIN))), 'allow');
+// A quoted -C literal is followed like an unquoted one: run from an ungated
+// directory, `git -C "<REPO>" commit` still checks REPO's unread diff.
+check('a quoted -C naming a gated repo is still checked',
+  decision(run('gates/commit-gate.cjs', pre('Bash', { command: `git -C "${REPO}" commit -m x` }, SID, PLAIN))), 'deny');
 // The words inside a message or a document are not an invocation.
 check('the words "git commit" inside a quoted string are allowed',
   commit(`echo "remember to git commit -m x" >> ${REPO}/notes.md`), 'allow');
 check('git status is not a commit', commit('git status --short'), 'allow');
+check('a commit after an apostrophe in double quotes is still a commit',
+  commit(`echo "it's"; git commit -m x; echo 'ok'`), 'deny');
 
 mark(diffMarker);
 check('after reading the diff, the commit is allowed', commit('git commit -m x'), 'allow');
@@ -535,6 +555,84 @@ check('git -C <symlink into a gated repo> commit: denied',
   decision(run('gates/commit-gate.cjs',
     pre('Bash', { command: `git -C ${SYMLINK} commit -m x` }, SID, PLAIN))), 'deny');
 try { fs.rmSync(SYMDIR, { recursive: true, force: true }); } catch {}
+
+console.log('\ncommit-gate.cjs — gitRunDirs refuses a -C literal containing a backtick');
+{
+  // A backtick makes the command non-simple (RAW_RISKY_CHARS), so gitRunDirs
+  // takes universalFallback, which adds a `-C` literal as a candidate only
+  // when isCleanLit accepts it. isCleanLit refuses the backtick, so the only
+  // candidate is the ungated session cwd and the commit is allowed. The
+  // directory is real and gated, so an isCleanLit that accepted the backtick
+  // would add it as a second candidate (isRealDir passes) and the commit
+  // would be denied.
+  const BACKTICK_HOST = fs.mkdtempSync(path.join(os.tmpdir(), 'gatebacktick-'));
+  const BACKTICK_REPO = path.join(BACKTICK_HOST, '`Y');
+  fs.mkdirSync(path.join(BACKTICK_REPO, '.serena'), { recursive: true });
+  fs.writeFileSync(path.join(BACKTICK_REPO, '.serena', 'project.yml'), 'project_name: "gitrundirs-backtick"\n');
+  rm(diffMarker);
+  check('git -C <a real, gated directory named with a backtick> commit, from an ungated session cwd: allowed',
+    decision(run('gates/commit-gate.cjs',
+      pre('Bash', { command: `git -C ${BACKTICK_REPO} commit -m x` }, SID, PLAIN))), 'allow');
+  try { fs.rmSync(BACKTICK_HOST, { recursive: true, force: true }); } catch {}
+}
+
+console.log("\ngate-lib.cjs — mainCheckoutRoot pipes git's stderr away, the same way repoIdentity already does");
+{
+  // findGatedRoot falls back to mainCheckoutRoot once its own filesystem walk
+  // finds nothing, and refs-record.cjs's hook process runs that walk on every
+  // lookup with no matching .serena/project.yml anywhere above it. Outside any
+  // git working tree, mainCheckoutRoot's own `git rev-parse` exits non-zero
+  // with "fatal: not a git repository ...", and its stdio option discards
+  // that message rather than letting execFileSync's default inherit it onto
+  // this process's own stderr -- a lookup started in an ordinary non-git
+  // directory stays silent on refs-record.cjs's own stderr.
+  const NOGIT = fs.mkdtempSync(path.join(os.tmpdir(), 'gatenogit-'));
+  const r = spawnSync('node', [path.join(HOOKS, 'gates', 'refs-record.cjs')], {
+    input: JSON.stringify({
+      hook_event_name: 'PostToolUse', tool_name: 'mcp__serena__find_referencing_symbols',
+      tool_input: { name_path: 'f' }, session_id: 'test-gates-quiet-0001', cwd: NOGIT,
+    }),
+    encoding: 'utf-8',
+    env: testEnv(),
+  });
+  check('a lookup outside any git repository prints nothing to refs-record.cjs\'s own stderr', r.stderr, '');
+  try { fs.rmSync(NOGIT, { recursive: true, force: true }); } catch {}
+}
+
+console.log('\nrefs-record.cjs — repoIdentity realpaths a gated root reached through a symlink, so a lookup through the link and an edit through its target agree');
+{
+  // A directory whose OWN path is a symlink, not merely one that sits below
+  // one: an absolute relative_path pointing straight at a file inside it
+  // reaches repoIdentity with the symlinked form still attached (lookupIdentity
+  // never realpaths an absolute path itself, and findGatedRoot's walk returns
+  // whatever string it was handed once `.serena/project.yml` is found through
+  // it). Without repoIdentity's own realpathOr, that unresolved form is what
+  // gets recorded, while an edit through SYM_REAL resolves to SYM_REAL's own path --
+  // the two identities then disagree and a later edit through the real path is
+  // wrongly denied. Neither
+  // directory needs to be a git repository: repoIdentity's no-git fallback
+  // (`catch { return real; }`) returns `real` verbatim, so this pins the
+  // realpath step on its own, with no git subprocess output to lean on.
+  const SYM_REAL = fs.mkdtempSync(path.join(os.tmpdir(), 'gatesymid-'));
+  fs.mkdirSync(path.join(SYM_REAL, '.serena'));
+  fs.writeFileSync(path.join(SYM_REAL, '.serena', 'project.yml'), 'project_name: "symid"\n');
+  fs.writeFileSync(path.join(SYM_REAL, 'f.py'), '# x\n');
+  const SYM_HOST = fs.mkdtempSync(path.join(os.tmpdir(), 'gatesymidhost-'));
+  const SYM_LINK = path.join(SYM_HOST, 'link');
+  fs.symlinkSync(SYM_REAL, SYM_LINK, 'dir');
+
+  const sid = 'test-gates-symid-lookup-0001';
+  run('gates/refs-record.cjs', {
+    hook_event_name: 'PostToolUse', tool_name: 'mcp__serena__find_referencing_symbols',
+    tool_input: { name_path: 'f', relative_path: path.join(SYM_LINK, 'f.py') },
+    session_id: sid, cwd: PLAIN,
+  });
+  check('a lookup through the symlinked path, then an edit through the real path, is allowed',
+    decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: path.join(SYM_REAL, 'f.py') }, sid, SYM_REAL))),
+    'allow');
+  try { fs.rmSync(SYM_HOST, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(SYM_REAL, { recursive: true, force: true }); } catch {}
+}
 
 console.log('\ngate-lib.cjs — BRIEF 12: gitRunDirs returns real paths so a symlink to a NESTED repo inside a gated tree is itself seen as gated');
 // gitRunDirs verified each cd/-C candidate's existence via a physical
@@ -1009,6 +1107,17 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
   fs.mkdirSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena'), { recursive: true });
   fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena', 'project.yml'), 'project_name: "embedquotedouble"\n');
   fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, 'y.py'), '# x\n');
+  // A directory literally named `it's`: a DOUBLE-quoted `cd` argument whose
+  // inner text holds a single quote is still one whole span -- quotedLitValue
+  // only refuses an inner quote matching its OWN delimiter (`"`), never the
+  // other kind, since POSIX double quotes give `'` no special meaning at all.
+  // With no directory of this name, isRealDir drops the unquoted path, so a
+  // quotedLitValue that refused every quote character would give the same
+  // result and the check below could not catch it.
+  const APOSTROPHE_DIR = path.join(A, "it's");
+  fs.mkdirSync(path.join(APOSTROPHE_DIR, '.serena'), { recursive: true });
+  fs.writeFileSync(path.join(APOSTROPHE_DIR, '.serena', 'project.yml'), 'project_name: "apostrophe"\n');
+  fs.writeFileSync(path.join(APOSTROPHE_DIR, 'y.py'), '# x\n');
   const real = (p) => fs.realpathSync(p);
 
   let n = 0;
@@ -1073,8 +1182,8 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
   {
     const sid = freshSid();
     lookup(sid, `../${path.basename(WT)}/src/w.py`);
-    check("a relative path escaping the session's root records the worktree", roots(sid), [real(WT)]);
-    check("a relative path escaping the session's root: an edit in the worktree is allowed",
+    check("a relative path escaping the session's root records the sibling repository", roots(sid), [real(WT)]);
+    check("a relative path escaping the session's root: an edit in the sibling repository is allowed",
       edit(sid, path.join(WT, 'src/w.py')), 'allow');
     check("a relative path escaping the session's root: an edit in the session's repository is still denied",
       edit(sid, path.join(A, 'src/a.py')), 'deny');
@@ -1116,6 +1225,19 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
       decision(run('gates/edit-gate.cjs', pre('Bash', {
         command: `echo x > ${path.join(A, 'src/a.py')}; echo x > ${path.join(B, 'src/b.py')}`,
       }, sid, A))), 'deny');
+  }
+  {
+    // With neither repository looked up, both targets are unopened, in the
+    // order bashWriteTargets found them in the command: A's first. The
+    // denial names the repository of unopened[0], so it names A and not B.
+    const sid = freshSid();
+    const res = run('gates/edit-gate.cjs', pre('Bash', {
+      command: `echo x > ${path.join(A, 'src/a.py')}; echo x > ${path.join(B, 'src/b.py')}`,
+    }, sid, A));
+    check('a Bash write into two unopened repositories, with no lookup at all: denied', decision(res), 'deny');
+    const why = res.out?.hookSpecificOutput?.permissionDecisionReason || '';
+    check('the denial names the first unopened repository (A), not B',
+      why.includes(path.basename(A)) && !why.includes(path.basename(B)), true);
   }
 
   // bashWriteTargets resolves a relative write target against every `cd`/
@@ -1298,6 +1420,19 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
       bash(`cd "a"b"c" && sed -i 's/x/y/' y.py`, sid2, A), 'allow');
   }
   {
+    // `"it's"` is one whole double-quoted span: its delimiter `"` never recurs
+    // inside it, so quotedLitValue trusts it, unlike `'a'b'c'`/`"a"b"c"`
+    // above. The directory it names is real, gated and unopened, so it becomes
+    // a candidate base and the write is denied. The write is a redirect, not
+    // `sed -i 's/x/y/'`: executableShell's quote blanking pairs the lone `'`
+    // in `it's` with the sed script's opening quote, which blanks the `sed`
+    // word itself, and bashWriteTargets then finds no write target at all.
+    const sid = freshSid();
+    lookup(sid, 'src/a.py');
+    check('a double-quoted `cd` argument holding a single quote is one span and a candidate base',
+      bash(`cd "${APOSTROPHE_DIR}" && echo x > y.py`, sid, A), 'deny');
+  }
+  {
     // A quoted `-C` argument is a candidate base too, the same as a quoted
     // `cd` argument: both go through universalFallback's single `add`
     // closure, so this proves `add` is reached from the `-C` loop as well as
@@ -1326,8 +1461,8 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
 console.log('\nrefs-record.cjs + edit-gate.cjs — a git worktree is its main checkout (identity, not gated root)');
 // GATED_MAIN and WORKTREE/WORKTREE_OWN are REAL git fixtures (git init, a
 // commit, then a real `git worktree add`) -- not the plain-directory stand-in
-// `repoa-wt` uses above. This is the must-fix case a plain-directory fixture
-// cannot exercise: repoIdentity's own `git rev-parse` walk.
+// `repoa-wt` uses above. A plain-directory fixture cannot exercise
+// repoIdentity's own `git rev-parse` walk; these can.
 {
   let n = 0;
   const freshSid = () => `test-gates-wt-${++n}`;
@@ -1359,16 +1494,47 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a git worktree is its main ch
         edit(sid, path.join(REPO, 'src/thing.py'), REPO), 'deny');
     }
     {
-      // Debugger must-fix: this block had no control proving the worktree is
-      // actually GATED at all -- every check above only asserts "allow" after
-      // a lookup that matches, so a worktree wrongly read as ungated
-      // (findGatedRoot failing silently, say) would pass every one of them
+      // A control proving the worktree is actually GATED: every check above
+      // only asserts "allow" after a lookup that matches, so a worktree
+      // wrongly read as ungated (findGatedRoot failing silently, say) would
+      // pass every one of them
       // for a reason unrelated to what they claim to test. A fresh session
       // with no lookup this turn must still be denied.
       const sid = freshSid();
       check(`with no lookup at all this turn, an edit in the worktree is denied (${label})`,
         edit(sid, path.join(wt, wtFile), wt), 'deny');
     }
+  }
+
+  // WORKTREE_OWN's OWN directory already carries a `.serena/project.yml`
+  // (Serena writes one on first use), so findGatedRoot walking up from a
+  // session started there finds it immediately and never needs
+  // mainCheckoutRoot's `--git-common-dir` fallback at all: `gated` is
+  // WORKTREE_OWN itself, not GATED_MAIN. Both cases below go through
+  // sessionIdentity(cwd), which then must call repoIdentity(WORKTREE_OWN) to
+  // translate that into GATED_MAIN's identity (--show-toplevel from a cwd
+  // inside a worktree names the worktree itself, and repoIdentity rewrites
+  // that suffix onto the shared main checkout). Swapping that call for a bare
+  // realpath of the gated root would yield WORKTREE_OWN's own path instead,
+  // unrelated to GATED_MAIN's identity. WORKTREE (no own config) cannot catch
+  // this: findGatedRoot returns GATED_MAIN for it, and repoIdentity and a
+  // bare realpath give the same answer for GATED_MAIN.
+  {
+    const sid = freshSid();
+    lookup(sid, undefined, WORKTREE_OWN);
+    check('a lookup with no relative_path, from a session started in a worktree with its own config, opens the main checkout',
+      edit(sid, path.join(GATED_MAIN, 'main.py'), GATED_MAIN), 'allow');
+  }
+  {
+    // The edit's own `cwd` here is what identityRecorded falls back to
+    // sessionIdentity(cwd) FOR (the old-format branch has no recorded
+    // identity to compare a hash against at all) -- it must be WORKTREE_OWN
+    // itself, standing in for "the session started here", not GATED_MAIN,
+    // or the mutant this pins never runs at the worktree path that exposes it.
+    const sid = freshSid();
+    mark(path.join(STATE, 'refs-checked', `${sid}.json`));
+    check('an old-format marker, from a session started in a worktree with its own config, opens the main checkout',
+      edit(sid, path.join(GATED_MAIN, 'main.py'), WORKTREE_OWN), 'allow');
   }
 }
 
@@ -1385,9 +1551,8 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — two Serena projects in one gi
   check('a lookup in mono/svc does NOT open an edit in mono/web',
     decision(run('gates/edit-gate.cjs', pre('Edit', { file_path: path.join(MONO, 'web', 'w.py') }, sid, path.join(MONO, 'web')))),
     'deny');
-  // Debugger must-fix: without this, a mono/svc or mono/web that was wrongly
-  // read as ungated would pass the two allow/deny checks above for the wrong
-  // reason -- neither one proves the target is actually policed at all. A
+  // A control: a mono/svc or mono/web wrongly read as ungated would pass the
+  // two allow/deny checks above for the wrong reason -- neither one proves the target is actually policed at all. A
   // fresh session with no lookup this turn, in either sub-project, must
   // still be denied.
   check('with no lookup at all this turn, an edit in mono/svc is denied',
@@ -1522,9 +1687,9 @@ check('the diff marker is cleared', fs.existsSync(diffMarker), false);
 {
   // A real identity recorded THIS turn must not survive a user prompt: the
   // per-session identity directory is removed alongside the marker, not just
-  // the marker file. Reviewer must-fix: a same-repository before/after check
-  // cannot tell a mutant that only unlinks the marker file (leaving the
-  // per-session identity directory itself in place) from correct code --
+  // the marker file. A same-repository before/after check cannot tell a
+  // mutant that only unlinks the marker file (leaving the per-session
+  // identity directory itself in place) from correct code --
   // the SECOND turn's own lookup rewrites that repository's identity file
   // into the very directory the first turn left behind, so the edit is
   // allowed on turn 2 for a reason that has nothing to do with clearing.
@@ -1556,7 +1721,7 @@ check('the diff marker is cleared', fs.existsSync(diffMarker), false);
 // =============================================================================
 console.log('\ndiscipline-reminder.cjs — an unvalidated session_id must not delete outside its own marker directory');
 {
-  // Debugger must-fix: session_id flows straight from hook JSON into
+  // session_id flows straight from hook JSON into
   // `path.join(configDir, 'state', kind, `${session}.json`)` and
   // `path.join(configDir, 'state', 'refs-checked', session)` with nothing in
   // between to sanitise it. A fully separate, isolated CLAUDE_CONFIG_DIR is
@@ -1660,9 +1825,8 @@ console.log('\nrefs-record.cjs — an unvalidated session_id must not write outs
 // fooled by that, because there is no code path in which "nothing was
 // written" reads as "the file exists". The burst is repeated (REPS) rather
 // than run once, because a genuine read-modify-write race is probabilistic --
-// reviewer-measured, a reintroduced RMW mutant passed a single burst 5 of 6
-// times -- so one clean run does not mean the recording is race-free; each
-// repeat gets its own fresh session id so a race in one cannot be masked by
+// a read-modify-write mutant can pass a single burst most of the time -- so
+// one clean run does not mean the recording is race-free; each repeat gets its own fresh session id so a race in one cannot be masked by
 // files a previous, unrelated burst already left behind.
 async function concurrencyTest() {
   console.log('\nrefs-record.cjs — concurrent lookups on distinct repositories all get recorded');

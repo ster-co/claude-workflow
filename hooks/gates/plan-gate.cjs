@@ -442,7 +442,21 @@ readStdin((input) => {
       // the plan that edit invalidated, not a plan nobody ever looked at —
       // the same distinction auditIsFresh's own comment draws, just now
       // checked across every path form instead of one.
-      problems.push(staleRec ? `${rel} — edited since its audit` : `${rel} — never audited`);
+      //
+      // The message lists every path form the lookup tried, each marked as
+      // existing on disk or not, so an operator can compare them with the
+      // `Plan:` path the audit recorded. When the command's shape leaves more
+      // than one candidate directory, willStage resolves a relative `git add`
+      // argument against each of them, so a path in a directory the command
+      // never staged in can appear here. The message names no staging
+      // command: the gate cannot tell which candidate directory the shell
+      // uses, willStage cannot see a quoted `git add` argument, and gitRunDirs
+      // does not follow a quoted `-C`.
+      const checked = [...candidates]
+        .map((c) => `${c} (${fs.existsSync(c) ? 'exists' : 'no such file'})`)
+        .join(', ');
+      problems.push(`${rel} — ${staleRec ? 'edited since its audit' : 'never audited'}; `
+        + `checked: ${checked}`);
       continue;
     }
 

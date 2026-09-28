@@ -64,6 +64,12 @@ No sabotage step: there is no behaviour to guard. No silent-failure hunt.
 
 Behavioural briefs keep the full review above, unchanged.
 
+When the brief is a wording review, name every violation in the diff in one pass — judge
+against the brief's list of lines plus any line the change itself added, not a sample of it.
+Cost: gate-followups BRIEF 4, rejected twice because each review named one leftover phrase
+at a time, so each round fixed that phrase and the next review found the next one; a
+debugger then listed every remaining violation at once and the third round passed.
+
 ## Output contract
 
 Full review: under 2,500 characters. Light review: under 600 characters — the same shape,

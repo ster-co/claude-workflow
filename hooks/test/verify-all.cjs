@@ -75,6 +75,7 @@ unit('test-serena-registry.cjs');
 unit('test-serena-relay.cjs');
 unit('test-ship-loop.cjs');
 unit('test-ship-loop-launch.cjs');
+unit('test-update-plugin.cjs');
 
 // --- settings.json is valid and wired ---------------------------------------
 console.log();

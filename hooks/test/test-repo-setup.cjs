@@ -251,6 +251,84 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
   check('and given both installers', /astral\.sh\/uv\/install/.test(context(res)), true);
 }
 
+// serenaDirIgnored answers true, false, or null when git could not tell (a
+// timeout, or any exit status from `git check-ignore` other than 0 or 1).
+// Called in-process: requiring repo-setup.cjs for its exports runs nothing
+// (the export test further down proves it in a separate process), and
+// serenaDirIgnored only spawns git.
+console.log('\nrepo-setup.cjs — serenaDirIgnored answers true, false, or null');
+{
+  const repoSetup = require(path.join(HOOKS, 'repo-setup.cjs'));
+
+  // Isolated from the operator's own git configuration -- a global
+  // excludesFile, an XDG git/ignore entry, or a system gitconfig -- any of
+  // which could answer the ignored-or-not question differently from the
+  // fixture under test.
+  const xdgEmpty = fs.mkdtempSync(path.join(os.tmpdir(), 'xdg-empty-'));
+  trash.push(xdgEmpty);
+  const isolated = { GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgEmpty, GIT_CONFIG_NOSYSTEM: '1' };
+  const withEnv = (vars, fn) => {
+    const prev = {};
+    for (const k of Object.keys(vars)) { prev[k] = process.env[k]; process.env[k] = vars[k]; }
+    try { return fn(); } finally {
+      for (const k of Object.keys(vars)) {
+        if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
+      }
+    }
+  };
+
+  const ignoredRoot = repo({});
+  fs.mkdirSync(path.join(ignoredRoot, '.serena'), { recursive: true });
+  fs.writeFileSync(path.join(ignoredRoot, '.gitignore'), '.serena/\n');
+  check('true: .serena/ is git-ignored here', withEnv(isolated, () => repoSetup.serenaDirIgnored(ignoredRoot)), true);
+
+  const notIgnoredRoot = repo({});
+  fs.mkdirSync(path.join(notIgnoredRoot, '.serena'), { recursive: true });
+  check('false: .serena/ is not git-ignored here', withEnv(isolated, () => repoSetup.serenaDirIgnored(notIgnoredRoot)), false);
+
+  // A directory that does not exist: the spawn fails before git runs, so
+  // git gives neither answer. git's own failure (exit 128) reaches null in
+  // the SessionStart test below, through a `git` shim.
+  const missing = path.join(os.tmpdir(), 'repo-setup-serenadirignored-missing');
+  check('null: git cannot be started in a directory that does not exist', repoSetup.serenaDirIgnored(missing), null);
+}
+
+// The SessionStart message reports the same three answers honestly, rather
+// than collapsing "could not tell" into a confident guess either way.
+console.log('\nrepo-setup.cjs — the session is told honestly whether .serena/ shows as untracked');
+{
+  const xdgEmpty = fs.mkdtempSync(path.join(os.tmpdir(), 'xdg-empty-'));
+  trash.push(xdgEmpty);
+  const gitIsolation = { GIT_CONFIG_GLOBAL: '/dev/null', XDG_CONFIG_HOME: xdgEmpty, GIT_CONFIG_NOSYSTEM: '1' };
+
+  const ignoredRoot = repo({ 'app/main.py': 'x = 1\n' });
+  fs.writeFileSync(path.join(ignoredRoot, '.gitignore'), '.serena/\n');
+  const resIgnored = start(ignoredRoot, gitIsolation);
+  check('true: told .serena/ is gitignored and adds nothing to git status',
+    /\.serena\/ is gitignored here/.test(context(resIgnored)), true);
+
+  const plainRoot = repo({ 'app/main.py': 'x = 1\n' });
+  const resPlain = start(plainRoot, gitIsolation);
+  check('false: told .serena/ is not gitignored and will show as untracked',
+    /\.serena\/ is not gitignored here/.test(context(resPlain)), true);
+
+  // A `git` shim on PATH hands every subcommand but one to the real git --
+  // including `rev-parse --show-toplevel`, which this hook also runs -- and
+  // exits 128 for `check-ignore`: git's status for a fatal error, neither of
+  // check-ignore's answers (0 ignored, 1 not ignored).
+  const realGit = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['git'], { encoding: 'utf8' }).trim().split('\n')[0];
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-shim-'));
+  trash.push(shimDir);
+  const shimScript = `#!/bin/sh\nif [ "$1" = "check-ignore" ]; then exit 128; fi\nexec ${JSON.stringify(realGit)} "$@"\n`;
+  fs.writeFileSync(path.join(shimDir, 'git'), shimScript);
+  fs.chmodSync(path.join(shimDir, 'git'), 0o755);
+
+  const unknownRoot = repo({ 'app/main.py': 'x = 1\n' });
+  const resUnknown = start(unknownRoot, { ...gitIsolation, PATH: `${shimDir}${path.delimiter}${process.env.PATH}` });
+  check('null: told it could not be determined, not a confident guess either way',
+    /could not be determined/.test(context(resUnknown)), true);
+}
+
 // MUST NOT create the tracked settings file. `.serena/` is gitignored globally,
 // so writing it unattended shows up in no git status; `.claude/settings.json` is
 // committed in the repos that have one, and creating it in a repository nobody

@@ -27,7 +27,10 @@ function hooksDir() {
 
 const DEFAULT_MODEL = 'opus';
 const DEFAULT_PAUSE_AT = 95;
-const DEFAULT_PASS_BUDGET_USD = 5;
+// Per-pass cap on Claude usage (API-price estimate; on a subscription it is usage, not billing).
+// $5 stalled heavy briefs (implement + review + fix + re-review) five times on 2026-09-28;
+// Mark approved a higher cap that day; $25 leaves ample room and still stops a runaway pass.
+const DEFAULT_PASS_BUDGET_USD = 25;
 const USAGE_STALE_MS = 30 * 60 * 1000;
 const POST_LIMIT_GRACE_MS = 2 * 60 * 1000;
 

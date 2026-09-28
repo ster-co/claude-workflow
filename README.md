@@ -91,9 +91,9 @@ Skip it and the discipline this config exists to enforce simply does not run. Ev
 session's `SessionStart` hook (`hooks/repo-setup.cjs`) checks for `uvx` on `PATH` before it
 writes a repository's `.serena/project.yml`; find it missing and it writes nothing, because
 the edit and commit gates key on that file existing (`hooks/gates/gate-lib.cjs`). The relay
-(`bin/serena-relay.cjs`) checks the same way for the repositories it configures — asking
-whether the command it is about to spawn resolves, `uv` by default — so the two paths that
-can write this file agree: without `uv`, no repository ever gets one this way, so no
+(`bin/serena-relay.cjs`) makes the same kind of check for the repositories it configures:
+it asks whether the command it is about to spawn resolves, `uv` by default, while the hook
+asks for `uvx`. Without the relay's command, no repository ever gets a config this way, so no
 repository is ever gated through it — the three `mcp__serena__*` symbol tools
 (`find_referencing_symbols`, `find_implementations`, `find_declaration`) the `implementer`
 agent declares stay unavailable, and there is no reference-lookup evidence the edit gate

@@ -207,10 +207,9 @@ declares it. You do not install it separately.
 `/plugin marketplace add` fails with an authentication or "not found" error, step 2 is not
 done: rerun its check.
 
-**Updating later:** from a terminal, `claude plugin marketplace update ster-co` then
-`claude plugin update workflow-discipline@ster-co`, then repeat step 4a — the plugin update
-refreshes the downloaded repository but not the `CLAUDE.md` you copied out of it — then a
-new session (step 5).
+**Updating later:** see the dedicated "Updating" section below, after step 7 — it is more
+than the two `claude plugin` commands above, and skipping the rest of it silently leaves an
+older `CLAUDE.md` and, sometimes, a broken `settings.json` in place.
 
 ---
 
@@ -291,7 +290,7 @@ orphans that rule.
 head -5 ~/.claude/CLAUDE.md                      # shows "# Global instructions"
 
 # settings merged without hooks, plugin still enabled
-node -e "const s=require(require('os').homedir()+'/.claude/settings.json');console.log('stale hooks:',JSON.stringify(s.hooks||{}).includes('.claude/hooks/')?'YES - see Troubleshooting':'none');console.log(s.enabledPlugins)"
+node -e "const s=require(require('os').homedir()+'/.claude/settings.json');console.log('stale hooks:',/\.claude[\\\\/]+hooks[\\\\/]+/.test(JSON.stringify(s.hooks||{}))?'YES - see Troubleshooting':'none');console.log(s.enabledPlugins)"
 
 # .serena/ is ignored (run inside any git repository)
 git check-ignore -v .serena/project.yml          # prints the ignore file and ".serena/"
@@ -482,6 +481,85 @@ Delete `setup-check` afterwards.
 
 ---
 
+## Updating
+
+`claude plugin update` only refreshes the plugin's own install directory. It never touches
+anything you copied or merged out of it in step 4, so skipping any piece of this is exactly
+how a machine ends up running a newer plugin against an older `CLAUDE.md` and a `settings.json`
+still wired to a `hooks` layout that no longer exists — hook commands fail with "Cannot find
+module", surfaced as every edit and shell command returning no result. Do all four steps,
+every time, not just when something looks broken.
+
+**Run the script — this is the recommended way.** It does all four steps below in one
+command, in plain Node rather than shell syntax, so there is no OS-specific quoting to get
+wrong (a colleague's PowerShell paste of the old copy step broke on backslash escaping he
+never wrote):
+
+```
+# macOS/Linux
+node ~/.claude/plugins/marketplaces/ster-co/bin/update-plugin.cjs
+
+# Windows (PowerShell)
+node $env:USERPROFILE\.claude\plugins\marketplaces\ster-co\bin\update-plugin.cjs
+```
+
+It prints each step as it runs, then a new-session reminder. It exits `0` when everything is
+clean, `2` when the `claude` commands and the `CLAUDE.md` copy both succeeded but the stale
+`hooks` check still failed (fix it by hand, per Troubleshooting, then start a new session —
+the script does not edit `settings.json` for you), or `1` on any other failure (read the
+printed error; the most common one is the plugin not being installed at all, see step 3).
+
+The rest of this section is what the script does, spelled out by hand — useful if `node`
+somehow is not the thing failing, or you want to run one step in isolation.
+
+1. **Update the marketplace and the plugin:**
+
+   ```
+   claude plugin marketplace update ster-co
+   claude plugin update workflow-discipline@ster-co
+   ```
+
+   **Check:** `/plugin` still lists `workflow-discipline@ster-co` as installed and enabled.
+
+2. **Re-copy `CLAUDE.md`** — repeat step 4a. The update refreshed
+   `~/.claude/plugins/marketplaces/ster-co/CLAUDE.md`, but your own `~/.claude/CLAUDE.md` is
+   a copy, not a symlink, so it silently stays at whatever version you last copied:
+
+   ```
+   # macOS/Linux
+   cp ~/.claude/plugins/marketplaces/ster-co/CLAUDE.md ~/.claude/CLAUDE.md
+
+   # Windows (PowerShell)
+   copy "$env:USERPROFILE\.claude\plugins\marketplaces\ster-co\CLAUDE.md" "$env:USERPROFILE\.claude\CLAUDE.md"
+   ```
+
+   **Check:** `head -5 ~/.claude/CLAUDE.md` shows "# Global instructions". This only proves
+   the file exists, not that it is current — there is no version marker in it to diff
+   against — so re-copy every time rather than trying to tell whether you need to.
+
+3. **Recheck for a stale `hooks` block** — repeat step 4's check. An update never touches
+   your own `settings.json` either, so a `hooks` block left over from before you ran step 4b
+   (or from an early version of this doc that had you copy the file wholesale) survives every
+   update untouched, its commands still pointing at whatever `.claude/hooks/` layout existed
+   back when it was written:
+
+   ```
+   node -e "const s=require(require('os').homedir()+'/.claude/settings.json');console.log('stale hooks:',/\.claude[\\/]+hooks[\\/]+/.test(JSON.stringify(s.hooks||{}))?'YES - see Troubleshooting':'none');console.log(s.enabledPlugins)"
+   ```
+
+   **Check:** prints `stale hooks: none`. `YES` means the same thing it does in step 4: see
+   Troubleshooting's `.claude/hooks/...cjs` row before continuing — don't reach for
+   `SKIP_CODE_GATES=1` instead, that only silences the symptom until the next session.
+
+4. **Start a new session** — same as step 5: hooks, plugins and MCP servers are read once at
+   session start, so nothing above takes effect in a session that was already running.
+
+After a large version jump, or if anything in steps 1–3 looked wrong, rerun step 7's
+`setup-check` proof in a throwaway repository too — files existing is not evidence, a denied
+edit is.
+
+---
+
 ## Troubleshooting
 
 | symptom | likely cause | fix |
@@ -496,6 +574,7 @@ Delete `setup-check` afterwards.
 | `git status` shows `.serena/` | step 4c not done | run 4c |
 | a change to the plugin or settings "does nothing" | old session still running | new session (step 5) |
 | a command acts as if `brainstorming` or `systematic-debugging` doesn't exist | `superpowers` did not install | `/plugin` — install `superpowers@claude-plugins-official` |
+| a copy-pasted command from this doc throws a shell parser error (PowerShell `Unexpected token`, or similar) | something about the paste — smart quotes from wherever it was copied, a partial selection, a stray prompt character — broke the shell's own quoting, not this doc | for the update commands specifically, use the `update-plugin.cjs` script instead — see "Updating" below, it has no shell quoting to break; for anything else, retype the command's quotes by hand rather than pasting |
 
 Two environment-variable escape hatches: `CLAUDE_NO_AUTO_REPO_SETUP=1` stops the setup hook
 writing `.serena/project.yml` (for a repository where you do not want Serena at all) — the
