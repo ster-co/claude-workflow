@@ -491,15 +491,15 @@ imperative framing can trip prompt-injection defenses and get surfaced to you in
 
 ```
 node ~/.claude/hooks/test/verify-all.cjs             # everything below, plus wiring assertions
-node ~/.claude/hooks/test/test-gates.cjs             # 68 — edit gate, commit gate, markers
-node ~/.claude/hooks/test/test-verify-checkpoint.cjs # 87 — verdicts, checkpoints, run state, /ship phase
+node ~/.claude/hooks/test/test-gates.cjs             # 217 — edit gate, commit gate, markers
+node ~/.claude/hooks/test/test-verify-checkpoint.cjs # 192 — verdicts, checkpoints, run state, /ship phase
 node ~/.claude/hooks/test/test-agent-log.cjs         # 24 — subagent accounting
 claude doctor                                        # install health, update channel
 ```
 
 `verify-all.cjs` exits non-zero on a wiring failure **or on any failing unit test** — it
-prints seven per-file counts and no total; summed, 359 tests at last count. Until
-2026-09-22 each test was piped
+prints twelve per-file counts and no total; summed, 2,001 tests at last count
+(2026-09-28). Until 2026-09-22 each test was piped
 to `tail -2`, so the script reported the status of `tail` and a red test could not fail it.
 
 Its gated-repos report always covers this repo; to have it also scan elsewhere on your

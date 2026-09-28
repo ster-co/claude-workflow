@@ -1,6 +1,6 @@
 # Cheatsheet
 
-Ten commands, seven agent roles, five hard gates. Written 2026-09-23.
+Eleven commands, seven agent roles, five hard gates. Written 2026-09-23, updated 2026-09-28.
 `README.md` explains how it works; this says what to type.
 [`COMMANDS.md`](COMMANDS.md) explains what each command does, in plain language.
 
@@ -166,7 +166,7 @@ creates it. `--all <dir>` walks a whole tree, nested repos included.
 ## Checking it still works
 
 ```
-node ~/.claude/hooks/test/verify-all.cjs   # 359 tests, seven files, wiring assertions
+node ~/.claude/hooks/test/verify-all.cjs   # 2,001 tests, twelve files, wiring assertions
 ```
 
 Exit 0 means all of it passed — **that was not true before 2026-09-22**, when unit tests were
