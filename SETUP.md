@@ -15,7 +15,7 @@ Windows commands have not yet been run on a real Windows machine — see
 3. [Install the plugin](#step-3--install-the-plugin)
 4. [Copy `CLAUDE.md`, merge the settings, ignore `.serena/`](#step-4--copy-claudemd-merge-the-settings-ignore-serena)
 5. [Restart Claude Code / reload VS Code](#step-5--restart-claude-code--reload-vs-code)
-6. [Open a git repository — twice](#step-6--open-a-git-repository--twice)
+6. [Open a git repository](#step-6--open-a-git-repository)
 7. [Prove the gates fire](#step-7--prove-the-gates-fire)
 
 ---
@@ -208,7 +208,9 @@ declares it. You do not install it separately.
 done: rerun its check.
 
 **Updating later:** from a terminal, `claude plugin marketplace update ster-co` then
-`claude plugin update workflow-discipline@ster-co`, then a new session (step 5).
+`claude plugin update workflow-discipline@ster-co`, then repeat step 4a — the plugin update
+refreshes the downloaded repository but not the `CLAUDE.md` you copied out of it — then a
+new session (step 5).
 
 ---
 
@@ -222,8 +224,10 @@ on Windows). You do not need to clone it. Three things to do from there.
 
 This makes the working rules **always-on** context in every session. A plugin cannot ship
 that — the `workflow-discipline` skill is the fallback, but it is only loaded on the turns
-`/ship` and `/plan` run. This overwrites any `~/.claude/CLAUDE.md` you already have; back
-yours up first if you care about it.
+one of six commands runs (`/ship`, `/blueprint`, `/diagnose`, `/brief`, `/execute`,
+`/land`). This overwrites any `~/.claude/CLAUDE.md` you already have; back yours up first if
+you care about it. Repeat this step after every plugin update, or your copy stays at the
+version you first installed.
 
 ```
 # macOS/Linux
@@ -316,17 +320,49 @@ installed or changed in steps 3–4 affects a session that was already running.
 something "should work" but doesn't, a new session is the first thing to try.
 
 **Check:** in the new session, `/mcp` lists `serena` as connected. The very first time
-this can take a minute or so — `uvx` is downloading Serena. If it stays failed, see
+this can take a minute or so — `uv` is downloading Serena. If it stays failed, see
 [Troubleshooting](#troubleshooting).
+
+What `serena` runs is `bin/serena-relay.cjs`, a small Node relay, not Serena itself. The
+relay joins the repository's shared Serena if one is running, or starts it. So every
+session in the same repository shares one Serena and one set of language servers instead
+of starting its own. It stops when the last session using it closes — which, with routing
+(below), may be a session in another repository, and can be before any session has
+started in the repository whose Serena it is: a lookup routed there from elsewhere can
+start it first, and that server then outlives the session that started it for as long as
+any other session using it still does.
+
+The relay also works outside the session's own repository: a lookup whose `relative_path`
+is an absolute path — into a `/ship` worktree or a different repository altogether — is
+routed to that repository's own shared Serena, joined, or started if none is running, and
+its result is relative to that repository's root, not the session's. A path with no `.git`
+or `.serena/project.yml` above it is refused with an error instead: falling back to the
+directory itself would give a Serena to `/`, `/tmp` or `~/Downloads`, which then idles for
+the rest of the session.
+
+**Without the plugin** (this repository checked out as `~/.claude`, which is how the author
+runs it), every session gets Serena from a user-scope entry, including sessions in this
+repository. The repository's own `.mcp.json` deliberately declares no `serena`, so **a
+clone with neither the plugin nor this user-scope entry has no Serena at all**, and the
+edit gate's reference lookups cannot run. Add the entry from a shell, so that the shell
+expands `~`; JSON args are not expanded. If an older user-scope `serena` entry exists,
+remove it first with `claude mcp remove serena -s user`.
+
+```
+# macOS/Linux
+claude mcp add serena -s user -- node ~/.claude/bin/serena-relay.cjs
+# Windows (PowerShell)
+claude mcp add serena -s user -- node $HOME\.claude\bin\serena-relay.cjs
+```
 
 ---
 
-## Step 6 — open a git repository — twice
+## Step 6 — open a git repository
 
 **The discipline only switches on inside a git repository.** At session start the setup
 hook asks git for the repository root; if the folder is not inside a git repository, it
 does nothing, no `.serena/project.yml` is written, and the edit and commit gates never
-fire. The slash commands (`/ship`, `/plan`, `/land`, …) still load, but nothing is
+fire. The slash commands (`/ship`, `/blueprint`, `/land`, …) still load, but nothing is
 enforced and Serena has no project to index.
 
 Three rules follow from that:
@@ -364,17 +400,19 @@ it, ask: *"What did the SessionStart hook say about Serena?"* Or just look:
 cat .serena/project.yml        # Windows: type .serena\project.yml
 ```
 
-Serena itself already started before that file existed, so it has not loaded those
-language servers yet.
+Serena reads that file only when its server starts, and the repository's shared Serena
+server may already be running. So after writing the file, the hook stops that server. The
+session's next Serena call starts a new one, which reads the file. There is no second session
+to open.
 
-**Start a new session** (step 5 — new terminal session, or a new conversation in VS Code;
-reload the window if in doubt).
-
-**Second session onward — this is what "working" looks like:**
+**This is what "working" looks like, from the first session on:**
 
 - `/mcp` shows `serena` connected.
-- Serena's dashboard is at <http://localhost:24282/dashboard/> (the next port up —
-  24283, 24284… — for each additional session running at once). It does **not** open a
+- Serena's dashboard is at <http://localhost:24282/dashboard/>. There is one dashboard per
+  repository, not per session, because sessions in one repository share one Serena. Each
+  additional repository with a shared Serena running at the same time takes the next free
+  port up: 24283, 24284, and so on — including a repository with no session of its own,
+  reached only because a session elsewhere routed a lookup into it. It does **not** open a
   browser tab by itself; that is deliberate.
 - `.serena/project.yml` exists and `git status` does not show `.serena/` (step 4c).
 - When Claude goes to edit a source file without first checking what depends on it, the
@@ -422,16 +460,17 @@ git commit -m init
 
 **7a. First session.** Start Claude Code in that folder (`claude`, or *File → Open
 Folder…* in VS Code and a new conversation). Check `.serena/project.yml` now exists and
-lists `- python` under `language_servers:`. Then start a **second** new session there.
+lists `- python` under `language_servers:`.
 
-**7b. Edit without looking first.** In the second session, ask Claude to change
+**7b. Edit without looking first.** In that same session, ask Claude to change
 `"hello {name}"` to `"hi {name}"`. Expect the first edit attempt to be **denied**, with a
 reason like:
 
-> *No reference lookup has been run this turn, and app.py lives in setup-check. Find out
-> what depends on the symbol you are about to change —
-> `mcp__serena__find_referencing_symbols({name_path: "<symbol>", relative_path: "<file>"})`
-> — report what it returns, then retry. ...*
+> *No reference lookup has been run this turn in setup-check, the repository app.py lives
+> in; a lookup in another repository does not count. Find out what depends on the symbol
+> you are about to change — call Serena's "find referencing symbols" tool
+> (`{name_path: "<symbol>", relative_path: "<file>"}`) — report what it returns, then
+> retry. ...*
 
 **7c. Let it recover.** Claude should call `find_referencing_symbols` on `greet` (finding
 `caller`) and retry — and the edit goes through.
@@ -451,23 +490,24 @@ Delete `setup-check` afterwards.
 | `/plugin` doesn't list `workflow-discipline` as enabled | `settings.json` was overwritten after install | `claude plugin enable workflow-discipline@ster-co`; use step 4b, not a plain copy |
 | hook errors mentioning `.claude/hooks/...cjs` / "Cannot find module", or `stale hooks: YES` in step 4's check | `settings.json` was copied wholesale, so it has the author's `hooks` block | delete the `hooks` block from `~/.claude/settings.json` by hand (4b's merge keeps hooks already in your file), then `claude plugin enable workflow-discipline@ster-co` |
 | no `.serena/project.yml` after a session | not in a git repo; no recognised source files; or `uvx` not on `PATH` | step 6 rules; `uvx --version` in a *new* terminal; ask Claude what the SessionStart hook reported |
-| `/mcp` shows `serena` failed | `uvx` missing from the `PATH` Claude Code started with | fully quit and reopen VS Code / the terminal after installing uv |
-| edits are never denied | repo not configured (above), first session in the repo, or the plugin's hooks are not loaded | check `.serena/project.yml`; `/hooks` should list `edit-gate.cjs` under `PreToolUse`; start a new session |
+| `/mcp` shows `serena` failed | `node` or `uv` missing from the `PATH` Claude Code started with, or, without the plugin, the user-scope relay path is wrong | fully quit and reopen VS Code / the terminal after installing node/uv; without the plugin, check `claude mcp list` shows an absolute path ending in `.claude/bin/serena-relay.cjs` (`.claude\bin\serena-relay.cjs` on Windows) with no literal `~` — if it has one, re-add the entry with step 5 |
+| edits are never denied | repo not configured (above), or the plugin's hooks are not loaded | check `.serena/project.yml`; `/hooks` should list `edit-gate.cjs` under `PreToolUse`; start a new session |
 | every edit is denied, even after a lookup | Serena not connected, so the lookup never succeeds | `/mcp`; start a new session |
 | `git status` shows `.serena/` | step 4c not done | run 4c |
 | a change to the plugin or settings "does nothing" | old session still running | new session (step 5) |
 | a command acts as if `brainstorming` or `systematic-debugging` doesn't exist | `superpowers` did not install | `/plugin` — install `superpowers@claude-plugins-official` |
 
 Two environment-variable escape hatches: `CLAUDE_NO_AUTO_REPO_SETUP=1` stops the setup hook
-writing `.serena/project.yml` (for a repository where you do not want Serena at all), and
-`SKIP_CODE_GATES=1` switches the edit and commit gates off. Both are for exceptions, not
-for making a denial go away.
+writing `.serena/project.yml` (for a repository where you do not want Serena at all) — the
+relay (`bin/serena-relay.cjs`) honours the same variable before it writes one for a
+repository the hook never ran in — and `SKIP_CODE_GATES=1` switches the edit and commit
+gates off. Both are for exceptions, not for making a denial go away.
 
 ---
 
 ## Optional: the rest of the author's toolset
 
-None of these is needed for `/ship`, `/plan`, `/execute`, `/brief` or `/land` — no command,
+None of these is needed for `/ship`, `/blueprint`, `/execute`, `/brief` or `/land` — no command,
 agent or skill in this repository calls them. They are the rest of the author's day-to-day
 setup; two of them back rules in `CLAUDE.md` directly.
 

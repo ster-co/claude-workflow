@@ -41,8 +41,26 @@ for p in "${INCLUDE[@]}"; do
 done
 mkdir -p "$STAGE/docs"
 [ -f "$REPO/docs/CHEATSHEET.md" ] && cp "$REPO/docs/CHEATSHEET.md" "$STAGE/docs/"
+[ -f "$REPO/docs/COMMANDS.md" ] && cp "$REPO/docs/COMMANDS.md" "$STAGE/docs/"
+[ -f "$REPO/docs/WHY-THIS-WORKFLOW.md" ] && cp "$REPO/docs/WHY-THIS-WORKFLOW.md" "$STAGE/docs/"
 # Anthropic's bundled skills ship with the app; they are not ours to distribute.
 rm -rf "$STAGE/skills/synced"
+find "$STAGE" -name .DS_Store -delete
+# enabledPlugins is this machine's own plugin enablement, not something a colleague
+# should inherit -- shipping it clobbers theirs if they ever copy settings.json
+# wholesale instead of using SETUP.md's merge script (step 4b). Strip it here so the
+# risk doesn't depend on which of the two documented paths a colleague picks.
+[ -f "$STAGE/settings.json" ] && node -e "
+  const fs = require('fs');
+  const p = '$STAGE/settings.json';
+  const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+  delete s.enabledPlugins;
+  // permissions.additionalDirectories names this machine's own directories (e.g. a
+  // personal Coding folder) -- meaningless, and an absolute path pointing nowhere,
+  // on a colleague's machine. Each colleague adds their own via /add-dir.
+  if (s.permissions) delete s.permissions.additionalDirectories;
+  fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+"
 say "   $(find "$STAGE" -type f | wc -l | tr -d ' ') files"
 
 say "== refusing to ship anything that should not leave =="

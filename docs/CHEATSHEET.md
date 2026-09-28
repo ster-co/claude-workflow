@@ -2,6 +2,7 @@
 
 Ten commands, seven agent roles, five hard gates. Written 2026-09-23.
 `README.md` explains how it works; this says what to type.
+[`COMMANDS.md`](COMMANDS.md) explains what each command does, in plain language.
 
 ---
 
@@ -11,7 +12,8 @@ Ten commands, seven agent roles, five hard gates. Written 2026-09-23.
 /brainstorm   I don't know what I want yet
 /explain      I don't understand this code
 /ship         build the thing            ← the front door, covers plan→brief→execute→land
-/bug          something is broken
+/quick        a small, obvious ask — answer, brainstorm, bug or change, inline, no plan
+/diagnose     something is broken
 /attack       try to break this
 /land         get it pushed and reviewed
 ```
@@ -24,10 +26,11 @@ Everything else is a step `/ship` already does for you.
 
 | you have | type | what happens |
 |---|---|---|
-| a vague itch | `/brainstorm <thing>` | 2–3 approaches with trade-offs, a recommendation, **stops**. Never writes a plan. Type `/plan` when you know what you want. |
+| a vague itch | `/brainstorm <thing>` | 2–3 approaches with trade-offs, a recommendation, **stops**. Never writes a plan. Type `/blueprint` when you know what you want. |
+| a small, obvious ask | `/quick <ask>` | answer, brainstorm, bug fix or change, inline, no plan, no subagents except `scout`. **Do-it-now threshold** (estimated before editing): ≤3 files, ~30 lines, no design call, a cause that reproduces, no shared resource outside this checkout. Crossing it — even mid-change — escalates to `/diagnose` or `/ship`; edits already made stay uncommitted and get reported. |
 | a clear feature | `/ship <idea>` | the whole pipeline; stops twice for you |
-| a written plan already | `/ship path/to/plan.md` | skips planning, stops at the approval gate |
-| a bug | `/bug <symptom>` | refuses to diagnose until environment, one-symptom and expected-vs-observed are settled |
+| a written plan already | `/ship path/to/blueprint.md` | skips planning, stops at the approval gate |
+| a bug | `/diagnose <symptom>` | refuses to diagnose until environment, one-symptom and expected-vs-observed are settled; a simple fix goes straight through, anything needing a decision is handed to `/ship` — answer with `/ship <n>` in the same chat |
 | a question about code | `/explain <what>` | answer in chat, `file:line` on every structural claim |
 | code you distrust | `/attack <target> [axes]` | one axis = cheap probe; several = fan-out, asks first |
 
@@ -112,13 +115,13 @@ Not to be confused with the bundled `code-review` skill: that hunts correctness 
 
 | | |
 |---|---|
-| `/plan <idea>` | triage → brainstorm → direction gate → plan doc → `plan-auditor` → stop |
+| `/blueprint <idea>` | triage → brainstorm → direction gate → plan doc → `plan-auditor` → stop |
 | `/brief <plan>` | plan → numbered briefs in `docs/briefs-<feature>.md` |
 | `/execute [range]` | per brief: implementer → reviewer → commit → next |
 | `/land` | verify, read the diff, **offer `/attack`**, commit, push, open PR |
 | `/handoff` | write the next session's opening prompt, deliberately |
 
-`/plan` triages into three tracks and you do not override it: **do it now** (small and
+`/blueprint` triages into three tracks and you do not override it: **do it now** (small and
 obvious), **iterate in a browser** (visual/taste work — a plan is the wrong artifact), or
 **really plan**.
 

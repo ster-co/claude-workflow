@@ -2,7 +2,7 @@
 description: Turn a task or an approved plan into numbered briefs in this repo's brief file, then print the opener that executes them.
 argument-hint: [what to do — a task description, or a path to an approved plan doc]
 # Deliberately model-invokable, unlike the entry-point commands. /ship and
-# /plan call this one mid-run, and a command the model cannot invoke breaks the
+# /blueprint call this one mid-run, and a command the model cannot invoke breaks the
 # chain: /ship reaches its approval gate and stops. Its side effects are bounded
 # by the gates, the per-brief reviewer and /execute's termination conditions --
 # not by being unreachable.
@@ -10,13 +10,26 @@ argument-hint: [what to do — a task description, or a path to an approved plan
 
 Write brief(s) for: **$ARGUMENTS**
 
-The plan doc normally comes from `/plan`. If you were handed a task description for work that
-needs a design call first, say so and route to `/plan` rather than inventing the design inside a
+**Before anything else, load the `workflow-discipline` skill** (by name — in this
+repo it lives at `skills/workflow-discipline/SKILL.md`). Every brief inherits its verification
+standards and scope rules, so they have to be in context while writing them. On a checkout with a
+`CLAUDE.md` it is already in context; on a plugin install no `CLAUDE.md` reaches the
+session, so this is the point where `/brief` pulls it back in.
+
+The plan doc normally comes from `/blueprint`. If you were handed a task description for work that
+needs a design call first, say so and route to `/blueprint` rather than inventing the design inside a
 brief.
 
 If the argument is **a path to a plan or design document**, read it in full and write the whole
-ladder — one brief per independently executable task, in dependency order, marking which ones
-are independent of each other. If it is **a task description**, write one brief.
+ladder, in dependency order, marking which ones are independent of each other. A task is
+**mechanical** when it deletes files, edits prose or config, renames or moves something
+without changing behaviour, or is a one-line change, and adds no behaviour and no test —
+anything else is **behavioural**, and if the text does not settle it, treat it as
+behavioural. Mechanical tasks share a brief, up to 3 per brief; give each behavioural task
+its own brief. Findings a reviewer marks NOTED go into follow-ups briefs appended at the end
+of the file once the ladder is done — mechanical NOTED findings grouped together, up to 3
+per brief, and a behavioural NOTED finding still gets its own brief. If it is **a
+task description**, write one brief.
 
 ## Why this format
 
@@ -31,10 +44,11 @@ condition, so the session needs no steering.
 
 1. **Find or create the brief file.** Look for an existing `docs/*briefs*.md` in this repo.
    If none exists, create `docs/briefs-<feature>.md` — named after the run, taken from
-   `node ~/.claude/hooks/run-state.cjs get` (that path means
-   `${CLAUDE_PLUGIN_ROOT}/hooks/run-state.cjs` when `CLAUDE_PLUGIN_ROOT` is set —
-   installed as a plugin — and `~/.claude/hooks/run-state.cjs` otherwise, running from
-   this repo). One shared `docs/briefs.md` renumbers across
+   `node ~/.claude/hooks/run-state.cjs get` (this command's hook scripts live in
+   `${CLAUDE_PLUGIN_ROOT}/hooks`; if that path reads as a real absolute path here —
+   installed as a plugin — use it everywhere this file says `~/.claude/hooks`; if it
+   still reads as the literal placeholder — running from a `~/.claude` checkout — use
+   `~/.claude/hooks` as written). One shared `docs/briefs.md` renumbers across
    concurrent features: two runs in one checkout both append BRIEF 4, and the second
    renumbers work the first has already committed. Record it with `--brief-file` so
    /execute finds the same file. Then fill in a `## House rules` section (below)
@@ -48,7 +62,9 @@ condition, so the session needs no steering.
    path and the baseline counts must come from actually running or reading them, not from
    convention. Run the suite once to get the real baseline if it is cheap.
 4. **Append the next BRIEF n.** Use the template below.
-5. **Print the opener** and nothing else after it.
+5. **Print the opener** and nothing else after it. Inside a `/ship` run, the opener is not a stop:
+   print it, then hand straight back to `/ship`, which runs `/execute` in the same turn. The
+   opener is for a human pasting it into a fresh session, not a cue to end this one.
 
 ## House rules block (once per file, at the top)
 
@@ -57,6 +73,8 @@ condition, so the session needs no steering.
 - Work in: <worktree path> on branch `<branch>`. Main checkout is <path> on `<branch>` —
   never commit there.
 - Tests: `<exact command with absolute interpreter path>`
+  This is the exact command `test-delta.cjs --command` will run — do not append `; echo` or
+  anything else after it, because that always makes the exit code 0.
   Baseline: <N passed, M failed, K skipped>. Already-red: <named test> — do not fix it,
   do not report it as a regression.
 - Money/scope guard: <endpoints or commands that bill or mutate shared state, and the
@@ -73,6 +91,9 @@ condition, so the session needs no steering.
 
 ```markdown
 ## BRIEF <n> — <title>
+**Class:** mechanical | behavioural
+**Serial:** <optional — a shared outside resource this brief needs alone: a fixed port, a
+database or emulator, a migration, a deploy, or a browser check>
 **Do:** <one imperative paragraph>
 **Files you own (edit only these):** <explicit paths>
 **Done when:** <a condition a machine can check>
@@ -102,8 +123,9 @@ For a single brief:
 Read <path/to/briefs.md> — the house rules, then execute BRIEF <n> exactly as written.
 ```
 
-For a ladder, hand it to `/execute` instead — it runs them serially with a reviewer per brief
-and commits as it goes:
+For a ladder, hand it to `/execute` instead — it runs one brief at a time, dispatching a
+parallel group's members together where the ladder marks them independent, with a reviewer
+per brief and a commit per brief as it goes:
 
 ```
 /execute <path/to/briefs.md> <first>-<last>

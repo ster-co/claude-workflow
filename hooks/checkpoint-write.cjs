@@ -30,7 +30,21 @@ process.stdin.on('end', () => {
   const session = input?.session_id;
   if (!session) process.exit(0);
 
+  // Two sources for the brief in flight: the legacy single-file marker, and
+  // gate-arm.cjs's per-brief directory (one file per armed brief, written the
+  // moment an implementer is dispatched). Any one file in the directory is
+  // enough to name a brief here -- this is a checkpoint for a human or a
+  // resumed session to read, not the gate itself, so picking an arbitrary
+  // still-armed brief over none at all is the right degradation. The legacy
+  // marker is tried first only because it is what `arm?.file` (the brief
+  // file path) has always come from; the per-brief file carries no such field.
   const arm = readJson(path.join(STATE_DIR, 'brief-exec', `${session}.json`));
+  let perBriefArm = null;
+  try {
+    const dir = path.join(STATE_DIR, 'brief-exec', session);
+    const [first] = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    if (first) perBriefArm = { brief: first.slice(0, -'.json'.length) };
+  } catch { /* no per-brief directory for this session */ }
   const review = readJson(path.join(STATE_DIR, 'brief-review', `${session}.json`));
   // The durable, feature-scoped state is the fallback a *different* session reads after
   // a crash; prefer it for the brief number when the session marker is absent.
@@ -45,7 +59,7 @@ process.stdin.on('end', () => {
       at: new Date().toISOString(),
       trigger: input?.trigger ?? null,
       cwd: input?.cwd ?? null,
-      brief: arm?.brief ?? durable?.currentBrief ?? null,
+      brief: arm?.brief ?? perBriefArm?.brief ?? durable?.currentBrief ?? null,
       briefFile: arm?.file ?? durable?.briefFile ?? null,
       feature: durable?.feature ?? null,
       lastVerdict: review ? `brief ${review.brief}: ${review.verdict}` : null,

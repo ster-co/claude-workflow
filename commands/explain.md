@@ -3,7 +3,7 @@ description: Explain a subsystem, feature, symbol or change at the altitude the 
 argument-hint: [what to explain — a subsystem, a path, a symbol, or a commit/branch range — and optionally the altitude]
 # No side effects: answers in chat, spawns no subagents, writes nothing unless
 # asked. That statelessness is what makes it safe for another command to
-# invoke as a grounding step before triage — /plan Step 2 or /bug, for
+# invoke as a grounding step before triage — /blueprint Step 2 or /diagnose, for
 # instance, could reach for it that way — which is why this command stays
 # model-invokable on purpose. No such wiring exists yet.
 ---
@@ -12,7 +12,7 @@ Explain: **$ARGUMENTS** (if empty, ask what and at what altitude before doing an
 
 ## The rule everything else here serves
 
-`plan.md` records what happened the one time this was measured on this setup: of the factual
+`blueprint.md` records what happened the one time this was measured on this setup: of the factual
 claims made while planning, **every claim carrying a `file:line` was correct, and every claim
 sourced from memory was wrong.** A plan at least gets read and gated before anything is built
 on it. An explanation does not — nothing downstream audits it, so an explanation that invents

@@ -19,9 +19,12 @@ You implement exactly one brief. Not the next one, not the obvious adjacent impr
 
 1. **Write the failing test first, run it, and confirm it fails for the right reason.** A
    test that has never been red has told you nothing about whether it tests the change.
-   Paste the failing output into your report.
+   Paste the relevant failing lines (not the whole output) into your report.
 2. **Implement the smallest thing that makes it pass.**
-3. **Run the suite and compare against the stated baseline**, not against zero failures.
+3. **While working, run only the tests related to the change** — `jest --findRelatedTests
+   <changed files>`, or pytest on the brief's test paths, or the one suite file the brief
+   names. Save the full suite for the end: run it once, with output to a file, and grep
+   that file — compare against the stated baseline, not against zero failures.
 4. **Do not commit.** The orchestrator owns staging and commits.
 
 **Never defer work the brief asked for.** Finish it, or stop and report `BLOCKED` with the
@@ -32,6 +35,10 @@ Stay inside the files you were given. If the brief's premise turns out to be wro
 are in the code, stop and say so rather than silently doing something else.
 
 ## Report
+
+Under 1,500 characters: what changed, the test command, the exit code, and the counts.
+Where full output would blow the cap, paste only the relevant lines or tail, not the
+whole run.
 
 ```
 ## Status Report

@@ -6,8 +6,14 @@
     "sessionUrl": false
   },
   "permissions": {
-    "defaultMode": "auto"
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(touch:*)",
+      "Bash(npx -y vercel@latest env add:*)",
+      "Bash(npx -y vercel@latest env rm:*)"
+    ]
   },
+  "model": "opus[1m]",
   "hooks": {
     "SessionStart": [
       {
@@ -27,6 +33,16 @@
             "type": "command",
             "command": "node \"$HOME/.claude/hooks/repo-setup.cjs\"",
             "timeout": 40
+          }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/worktree-sweep.cjs\"",
+            "timeout": 30
           }
         ]
       }
@@ -60,6 +76,16 @@
           {
             "type": "command",
             "command": "node \"$HOME/.claude/hooks/gates/plan-gate.cjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/gate-arm.cjs\"",
+            "timeout": 10
           }
         ]
       }
@@ -190,15 +216,6 @@
       }
     ]
   },
-  "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
-    "playwright@claude-plugins-official": true,
-    "superpowers@claude-plugins-official": true,
-    "microsoft-docs@claude-plugins-official": true,
-    "azure@claude-plugins-official": true,
-    "pyright-lsp@claude-plugins-official": true,
-    "typescript-lsp@claude-plugins-official": true
-  },
   "extraKnownMarketplaces": {
     "skills": {
       "source": {
@@ -214,10 +231,10 @@
   "effortLevel": "high",
   "modelSettings": {
     "claude-sonnet-5": {
-      "effortLevel": "low"
+      "effortLevel": "high"
     },
     "claude-opus-5-5": {
-      "effortLevel": "high"
+      "effortLevel": "medium"
     }
   },
   "promptSuggestionEnabled": true,
@@ -228,5 +245,7 @@
   "fileCheckpointingEnabled": true,
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
-  "claudeCode.useCtrlEnterToSend": true
+  "claudeCode.useCtrlEnterToSend": true,
+  "inputNeededNotifEnabled": true,
+  "enableWorkflows": false
 }

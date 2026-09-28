@@ -1,0 +1,11 @@
+{
+  "//": "The plugin's serena entry. plugin.json names this file under mcpServers, and Claude Code loads it after the root .mcp.json; a serena declared there would be replaced by this one by name, but the root file deliberately declares none (see its comment). The plain ${CLAUDE_PLUGIN_ROOT} form is required: probed on Claude Code 2.1.280, the ${CLAUDE_PLUGIN_ROOT:-.} form resolves to the `.` default in plugin scope as well, and the relay is then looked up in the session's repository. bin/serena-relay.cjs joins or starts ONE shared Serena per repository instead of a Serena per session. Requires `uv` on PATH.",
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/serena-relay.cjs"],
+      "env": {}
+    }
+  }
+}

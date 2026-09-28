@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const { runFor } = require('../run-state.cjs');
 
 const SOURCE_EXT = new Set([
@@ -34,6 +35,33 @@ const markerPath = (kind, session) => path.join(STATE_DIR, kind, `${session}.jso
 
 function gatesDisabled() {
   return process.env.SKIP_CODE_GATES === '1';
+}
+
+/**
+ * The main checkout a directory's `.git` ultimately shares, via
+ * `git rev-parse --git-common-dir`. A plain repo and every `git worktree` of
+ * it all resolve to the same `.git` here, which is what lets a worktree be
+ * recognised as belonging to a gated repo whose `.serena/project.yml` lives
+ * only in the main checkout — a worktree does not get its own `.serena/`
+ * (`claude-repo-setup.sh` runs once, against the checkout it was pointed at).
+ * Returns null for anything that is not inside a git working tree at all.
+ */
+function mainCheckoutRoot(dir) {
+  let out;
+  try {
+    // --git-common-dir is printed relative to the directory git actually ran
+    // in, which for a symlinked `dir` is the symlink's RESOLVED target
+    // (getcwd() inside git sees through the symlink), not `dir` itself.
+    // Resolving that relative output against `dir` then landed nowhere near
+    // the real repo — a symlink into a subdirectory of a gated main checkout
+    // read as ungated. --path-format=absolute makes git do that resolution
+    // itself, from the directory it is actually standing in, instead of this
+    // function redoing it against a path that may not match.
+    out = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: dir, encoding: 'utf8', timeout: 5000 }).trim();
+  } catch { return null; }
+  if (!out) return null;
+  return path.basename(out) === '.git' ? path.dirname(out) : out;
 }
 
 /**
@@ -55,9 +83,19 @@ function findGatedRoot(start) {
   for (;;) {
     if (fs.existsSync(path.join(dir, '.serena', 'project.yml'))) return dir;
     const parent = path.dirname(dir);
-    if (parent === dir) return null;
+    if (parent === dir) break;
     dir = parent;
   }
+  // Nothing found by walking up from `start` itself. `start` may be a
+  // worktree whose OWN directory tree never reaches the `.serena/` that
+  // governs it, because that lives only in the main checkout — resolve it
+  // via the shared `.git` and check there before giving up. This also
+  // re-runs the identical (fast, cheap) check for the ordinary non-worktree
+  // case that already failed above; it is not expected to find anything new
+  // there.
+  const common = mainCheckoutRoot(path.resolve(start));
+  if (common && fs.existsSync(path.join(common, '.serena', 'project.yml'))) return common;
+  return null;
 }
 
 function isSourceFile(p) {
@@ -80,7 +118,7 @@ function isSourceFile(p) {
  * that stamped `finishedAt` without also clearing `phase` still reads as
  * unconstrained.
  *
- * `/plan`'s "do it now" triage is the reason this must default open: it
+ * `/blueprint`'s "do it now" triage is the reason this must default open: it
  * deliberately creates no run state for a small fix, so a session with
  * nothing bound here must read exactly like one with a run parked at
  * `executing` — both allowed.
@@ -125,24 +163,638 @@ function executableShell(command) {
     .replace(/"[^"]*"/g, '""');
 }
 
+// Shell operators separate commands whether or not they are spelled with spaces
+// around them. `git add x&&git commit -m y` is two commands, and splitting on
+// whitespace alone produced the token `x&&git`, so the second `git` was never
+// seen. Normalise first, tokenise once. Shared by both gates, and by
+// gitRunDirs below, so the three do not carry three slightly different copies
+// of the same parse.
+const SEPARATOR = /^(&&|\|\||[;&|<>])$/;
+const tokenize = (shell) => shell
+  .replace(/(&&|\|\||[;&|<>])/g, ' $1 ')
+  // A newline is a command separator too. `\s+` already treats it as
+  // whitespace between tokens, which is exactly the bug: the newline
+  // disappears into that whitespace run instead of surviving as a token of
+  // its own, so a `cd sub\ngit commit` looks to every SEPARATOR-testing
+  // consumer like there was never anything between `sub` and `git` at all —
+  // the `git` token, and the command it names, went unseen. A newline runs
+  // the next statement unconditionally, exactly like `;`, so it is folded
+  // into the same separator token rather than kept distinct.
+  .replace(/\r?\n/g, ' ; ')
+  .split(/\s+/)
+  .filter(Boolean);
+
+// Git's global flags sit between `git` and the subcommand, and several take a
+// separate value token (`-c user.name=x`, `-C dir`, `--git-dir path`).
+// Consuming the flag without its value lets the value be mistaken for the
+// subcommand, or the subcommand be mistaken for that flag's value.
+const VALUE_FLAGS = /^(-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--config-env)$/;
+
+/**
+ * Walks past `git` and its global flags and returns where the subcommand sits,
+ * plus the `-C <dir>` that git would run in (as the raw token, still quoted /
+ * unresolved). Returns null if this is not a git invocation at all.
+ */
+function gitAt(tokens, i) {
+  if (tokens[i] !== 'git') return null;
+  let j = i + 1;
+  let dir = null;
+  while (j < tokens.length && tokens[j].startsWith('-')) {
+    const eq = tokens[j].includes('=');
+    const takesValue = VALUE_FLAGS.test(tokens[j]) && !eq;
+    if (tokens[j] === '-C' && takesValue) dir = tokens[j + 1];
+    j += takesValue ? 2 : 1;
+  }
+  return { sub: tokens[j], at: j, dir };
+}
+
+function gitSubcommandIs(shell, name) {
+  const tokens = tokenize(shell);
+  for (let i = 0; i < tokens.length; i++) {
+    const g = gitAt(tokens, i);
+    if (g && g.sub === name) return true;
+  }
+  return false;
+}
+
+/**
+ * A `cd`/`-C` argument fit to trust as a literal directory name, per
+ * Decision 9's allowlist grammar: no quote character anywhere in it, no `$`
+ * or backtick (a variable or command substitution), no `~` (needs `$HOME`
+ * to expand), no glob metacharacter (`*`, `?`, `[...]` character classes,
+ * `{...}` brace expansion), no parenthesis (a subshell marker masquerading
+ * as a word), no leading `-` (an option, not a path), and not empty. A
+ * bracketed token such as `n[o]pe` may not land where its own text says it
+ * does — the shell can expand it against whatever else happens to be on
+ * disk — so trusting it just because a directory of that exact bracketed
+ * name happens to exist would be the same mistake `~`/`*`/`?` are already
+ * refused for.
+ *
+ * `raw` must be the token as it appears in the ORIGINAL, unquote-blanked
+ * shell text — gitRunDirs below is deliberately given that text rather than
+ * the quote-blanked `shell` every other helper in this file uses, because a
+ * quoted `-C` target used to be blanked to `''`/`""` by that shared stripper
+ * and then treated as a literal empty-string path, silently resolving to
+ * "the current directory" instead of being refused as unresolvable.
+ */
+function isCleanLit(raw) {
+  if (!raw || raw.startsWith('-')) return false;
+  return !/['"$`~*?()[\]{}]/.test(raw);
+}
+
+/**
+ * The inner text of `raw` when it is a whole, balanced QUOTED literal --
+ * trusted by `universalFallback`'s `bashWriteTargets` caller even though
+ * isCleanLit (correctly) refuses it there for its own quote characters.
+ * `'...'` of any content is trusted unconditionally: POSIX single quotes
+ * admit no escaping at all, so a balanced pair can only ever hold literal
+ * text -- the same fact `stripSafeQuotes` above relies on for a
+ * single-quoted span. `"..."` is trusted only when its content has none of
+ * `$`, backtick or `\`, the three characters with any special meaning inside
+ * double quotes (a substitution or an escape could otherwise be hiding in
+ * it).
+ *
+ * `raw` must be a token straight out of `gitDirTokens`, which keeps quote
+ * characters IN the token rather than stripping them. Checking `raw[0]` and
+ * its last character against the SAME quote character rules out a quote that
+ * does not bound the WHOLE token (`'B'foo`, `foo'B'`), but that alone is not
+ * enough to prove the token is nothing but one quoted span: `'a'b'c'` and
+ * `"a"b"c"` pass that check too, yet each is several quoted fragments the
+ * shell concatenates side by side (`cd 'a'b'c'` names the directory `abc`),
+ * not one literal `a'b'c`/`a"b"c`. So the inner text is refused whenever it
+ * contains the SAME quote character again -- a genuine, single quoted span
+ * can never hold an unescaped copy of its own delimiter.
+ *
+ * Returns null for anything that is not a whole, trustworthy quoted span.
+ * Never called from `gitRunDirs`' own candidate collection, or from the
+ * strict per-`git` grammar below, both of which trust only what isCleanLit
+ * accepts.
+ */
+function quotedLitValue(raw) {
+  if (!raw || raw.length < 2) return null;
+  const q = raw[0];
+  if ((q !== "'" && q !== '"') || raw[raw.length - 1] !== q) return null;
+  const inner = raw.slice(1, -1);
+  if (inner.includes(q)) return null;
+  if (q === '"' && /[$`\\]/.test(inner)) return null;
+  return inner;
+}
+
+/**
+ * The index in `tokens` (a segment's own token list, with `tokens[0] ===
+ * 'cd'` already confirmed by the caller) of `cd`'s directory argument, or
+ * null when there is none. `acceptFlags` additionally skips a leading `--`,
+ * `-P` or `-L` -- `cd -- B`, `cd -P B`, `cd -L B` are all ordinary POSIX
+ * `cd` invocations naming B, not B named `--`/`-P`/`-L` itself. Passed only
+ * from `bashWriteTargets`: `gitRunDirs`' own strict grammar, and its
+ * universalFallback fallback, trust only the unadorned `cd LIT` shape.
+ */
+function cdArgIndex(tokens, acceptFlags) {
+  let i = 1;
+  if (acceptFlags) {
+    while (i < tokens.length && (tokens[i] === '--' || tokens[i] === '-P' || tokens[i] === '-L')) i++;
+  }
+  return i < tokens.length ? i : null;
+}
+
+function isRealDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+// `p` with every symlink component dereferenced, or `p` itself when it does
+// not exist (a candidate directory this walk could not resolve at all is
+// still worth keeping AS TYPED — universalFallback already only adds
+// candidates isRealDir confirms exist, so this only ever fires on `start`,
+// which must stay a candidate even when it happens not to exist).
+function realOrSelf(p) {
+  try { return fs.realpathSync(p); } catch { return p; }
+}
+
+/**
+ * Whether `lit` contains a `..` PATH COMPONENT anywhere in it — not merely the
+ * two characters, which could also occur inside a longer segment name like
+ * `foo..bar`. Reviewer must-fix: `git -C F/L/..`, where `L` is a symlink into
+ * a gated repo's subdirectory, is trusted enough by isCleanLit alone (no quote,
+ * no glob character) to enter the strict per-`git` grammar below, which then
+ * resolves it with plain `path.resolve` — a purely textual operation that
+ * cancels `L` against the trailing `..` without ever knowing `L` is a symlink,
+ * landing on the symlink's ungated HOST directory instead of its real,
+ * possibly gated, parent. Refusing any literal that spells `..` at all, on the
+ * strict/fast path only, closes that off structurally: a literal this
+ * function refuses is never trusted to drop the session directory, so it
+ * falls to universalFallback instead, which keeps the session directory (and
+ * every directory the command names) a candidate regardless of what this
+ * function made of the rest of the path. This is deliberately broader than
+ * the exact shape found — belt and braces alongside physicalResolve below,
+ * not a substitute for it.
+ */
+function hasDotDotSegment(lit) {
+  return lit.split(/[\\/]/).includes('..');
+}
+
+/**
+ * A cd/-C literal resolved the way an actual `chdir` — and so `git -C` itself
+ * — resolves it: physically, following whatever symlinks the path passes
+ * through, rather than the textual, lexical collapsing `path.resolve` alone
+ * performs. Concatenating with `path.resolve` first and dereferencing after
+ * only works when nothing in `cur`/`lit` needs a filesystem lookup to make
+ * sense of; a `cur` that is itself a symlink still resolves correctly here
+ * because `fs.realpathSync` dereferences the WHOLE input, not just its own
+ * argument — the caller does not need to have realpath'd `cur` already.
+ *
+ * hasDotDotSegment above already refuses to let a `..`-bearing literal reach
+ * this function on the strict/fast path at all, so in practice every `lit`
+ * arriving here needs only its symlinks dereferenced, never a `..` walked
+ * back out of one — but resolving physically at every step, rather than
+ * trusting that argument to hold for every shape nobody has tried yet, is the
+ * belt this file's own reviewer asked for.
+ *
+ * Returns null when the result does not exist (or `cur` itself no longer
+ * does), so the caller treats it exactly like any other unresolvable
+ * literal: ineligible for the fast path.
+ */
+function physicalResolve(cur, lit) {
+  try {
+    return fs.realpathSync(path.resolve(fs.realpathSync(cur), lit));
+  } catch { return null; }
+}
+
+/**
+ * A quote-aware tokenizer over the RAW (heredoc-stripped, otherwise
+ * unmodified) command text — kept separate from the shared `tokenize`
+ * above because that one runs on `executableShell`'s output, which has
+ * already replaced every quoted span with `''`/`""`. That is fine for
+ * deciding whether an unquoted `git commit` is really there; it is useless
+ * for telling a token that TYPED like a plain path from one that only
+ * looks that way after blanking erased its quotes.
+ *
+ * Whitespace and operator characters are token/statement boundaries only
+ * OUTSIDE a quote — inside one they are literal content, so `-m "a && b"`
+ * stays one token and its `&&` is never mistaken for a real separator. A
+ * multi-character operator (`&&`, `||`) is matched before the
+ * single-character set, and a newline is folded into `;`, the same way
+ * `tokenize` above folds it: it runs the next statement unconditionally,
+ * exactly like `;` does.
+ */
+function gitDirTokens(command) {
+  const text = stripHeredocBodies(command);
+  const OPERATOR_CHARS = ';&|<>';
+  const tokens = [];
+  let cur = '';
+  let quote = null;
+  const push = () => { if (cur) { tokens.push(cur); cur = ''; } };
+  const pushOp = (op) => { push(); tokens.push(op); };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      cur += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < text.length) cur += text[++i];
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < text.length) { cur += ch + text[++i]; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === '&' && text[i + 1] === '&') { pushOp('&&'); i++; continue; }
+    if (ch === '|' && text[i + 1] === '|') { pushOp('||'); i++; continue; }
+    if (OPERATOR_CHARS.includes(ch)) { pushOp(ch); continue; }
+    if (ch === '\n') { pushOp(';'); continue; }
+    if (ch === '\r') continue;
+    if (/\s/.test(ch)) { push(); continue; }
+    cur += ch;
+  }
+  push();
+  return tokens;
+}
+
+/**
+ * The command's tokens cut into the shell segments `&&`/`||`/`;`/`&`/`|`/
+ * `<`/`>` join, each segment keeping only its own word tokens and the single
+ * operator token that led into it (`null` for the very first segment). This
+ * is what lets gitRunDirs check the ONE shape it trusts enough to drop the
+ * session directory: an unbroken `cd LIT &&` prefix running from the very
+ * start of the command, with nothing else mixed in anywhere in that prefix.
+ */
+function splitSegments(tokens) {
+  const OPS = new Set(['&&', '||', ';', '&', '|', '<', '>']);
+  const segments = [];
+  let cur = [];
+  let precededBy = null;
+  for (const t of tokens) {
+    if (OPS.has(t)) {
+      segments.push({ tokens: cur, precededBy });
+      precededBy = t;
+      cur = [];
+    } else {
+      cur.push(t);
+    }
+  }
+  segments.push({ tokens: cur, precededBy });
+  return segments;
+}
+
+/**
+ * The fail-closed candidate set used whenever a `git` invocation does not
+ * match the strict allowlist grammar below: the session directory itself,
+ * plus every OTHER directory the command so much as mentions via a `cd`
+ * that is the first word of its own segment, or a `-C` flag wherever it
+ * sits (`env -C DIR ...` included -- this loop does not care what precedes
+ * the flag), as long as that argument is a clean literal (isCleanLit)
+ * resolving to a directory that actually exists. None of this claims to
+ * know which of them the git command actually ran in — that is exactly what
+ * could not be established — it only widens the set a caller denies
+ * against, per Decision 9: "the gate denies if any candidate blocks."
+ *
+ * `opts.acceptQuotedLit` and `opts.acceptCdFlags` are for `bashWriteTargets`
+ * alone. `gitRunDirs`' two calls below pass neither, so its own candidate
+ * set — and the strict per-`git` grammar's own fallback — are exactly as
+ * narrow as isCleanLit makes them: only the caller that opts in trusts
+ * a quoted literal (`quotedLitValue`) as a directory argument — a `cd`'s own
+ * argument (via `cdArgIndex`, which also admits a `cd --`/`cd -P`/`cd -L`
+ * prefix) OR a `-C` flag's argument, since `add` below is the single path
+ * both go through.
+ */
+function universalFallback(segments, start, opts = {}) {
+  const out = new Set([start]);
+  const add = (lit) => {
+    if (!isCleanLit(lit)) {
+      if (!opts.acceptQuotedLit) return;
+      const unquoted = quotedLitValue(lit);
+      if (unquoted === null) return;
+      lit = unquoted;
+    }
+    const abs = path.resolve(start, lit);
+    if (isRealDir(abs)) out.add(realOrSelf(abs));
+  };
+  for (const seg of segments) {
+    if (seg.tokens[0] === 'cd') {
+      const i = cdArgIndex(seg.tokens, opts.acceptCdFlags);
+      if (i !== null) add(seg.tokens[i]);
+    }
+    for (let i = 0; i < seg.tokens.length; i++) {
+      if (seg.tokens[i] === '-C') add(seg.tokens[i + 1]);
+    }
+  }
+  return out;
+}
+
+// Shell features whose comment / heredoc / quote / subshell handling
+// gitDirTokens takes on faith rather than fully parses. Get one wrong — an
+// unmatched `'` inside a `#` comment, inside `$'...'` ANSI-C quoting, or
+// inside a heredoc body stripHeredocBodies failed to recognise (its
+// delimiter grammar does not accept a hyphen, so `<<END-MSG` slips through
+// unstripped) — and the quote-aware tokenizer's quote state desyncs for the
+// rest of the command, silently losing whatever `git` token came after the
+// corruption. Reviewer-found: `"# don't forget\ngit commit -m x"`,
+// `"echo hi # it's done\ngit commit -m x"`, `"echo $'it\\'s' && git commit"`,
+// and a heredoc with an apostrophe in its body all made gitRunDirs return
+// `[]` — no candidates at all, so both gates allowed a commit HEAD used to
+// deny. `(`/`)` get the same treatment: a subshell's `cd` must never be
+// trusted as a literal, and the strict grammar below already refuses it, but
+// a stray unmatched paren inside one of these same risky spans can desync
+// the tokenizer exactly like a quote can. `$` joins the set for the same
+// reason a bare, unquoted one always could start a `$(...)`/`${...}`
+// substitution this parser does not evaluate.
+const RAW_RISKY_CHARS = /[#'"\\`()$]/;
+
+/**
+ * Replaces every quoted span in `command` that cannot execute or expand
+ * anything with a single placeholder word, so isSimpleCommand's
+ * risky-character scan below never has to see it: a `'...'` of any content
+ * (POSIX single quotes admit no escaping at all, so a balanced pair can only
+ * ever hold literal text) or a `"..."` whose content has none of `$`,
+ * backtick, `\` (so no command/variable substitution and no escape sequence
+ * can be hiding in it — inside double quotes those three are the ONLY
+ * characters with special meaning; parentheses and apostrophes are plain
+ * text there).
+ *
+ * A `"..."` that DOES contain one of those, or a `'`/`"` with no matching
+ * close, is left exactly as it was — quote character and all — rather than
+ * guessed at. That is deliberate: it is what makes isSimpleCommand's scan
+ * below fail such a command, the same way it always has.
+ *
+ * This has no effect on what gitRunDirs actually trusts as a `cd`/`-C`
+ * literal: that walk always tokenizes the ORIGINAL, unstripped command via
+ * gitDirTokens, and isCleanLit rejects any token that still contains a quote
+ * character. A quoted string can supply nothing to that grammar whether or
+ * not this function judged it safe to elide from isSimpleCommand's view.
+ */
+function stripSafeQuotes(command) {
+  let out = '';
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end === -1) { out += ch; continue; } // unmatched: leave it to fail the scan below
+      out += 'Q';
+      i = end;
+      continue;
+    }
+    if (ch === '"') {
+      // Walk to the matching close, honouring backslash-escaping exactly like
+      // gitDirTokens does, so an escaped `"` inside the string is not
+      // mistaken for its end.
+      let j = i + 1;
+      let content = '';
+      let closed = false;
+      while (j < command.length) {
+        const c = command[j];
+        if (c === '\\' && j + 1 < command.length) { content += c + command[j + 1]; j += 2; continue; }
+        if (c === '"') { closed = true; break; }
+        content += c;
+        j++;
+      }
+      if (!closed) { out += ch; continue; } // unmatched: leave it to fail the scan below
+      if (/[$`\\]/.test(content)) {
+        // Cannot prove this span is inert: leave the whole thing, quotes
+        // included, so the scan below still sees why.
+        out += command.slice(i, j + 1);
+      } else {
+        out += 'Q';
+      }
+      i = j;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Whether `command` is safe to hand to the strict per-`git` allowlist grammar
+ * below at all. Every quoted span stripSafeQuotes can prove is inert is first
+ * replaced by a placeholder word; what is left must contain none of
+ * RAW_RISKY_CHARS and no heredoc `<<`. Failing that makes the tokenizer's own
+ * quote/comment/heredoc handling irrelevant to the allow decision: gitRunDirs
+ * falls back to universalFallback for the WHOLE command below, which always
+ * keeps the session directory a candidate regardless of what gitDirTokens
+ * made of the rest of the text.
+ *
+ * This used to also require exactly one `git` word in the stripped text, on
+ * the theory that a second `git` elsewhere is exactly the shape that can go
+ * missing from gitDirTokens' output without this function ever finding out.
+ * That check was itself unsound: stripSafeQuotes collapses an ENTIRE inert
+ * quoted span to one placeholder before the count runs, so a real, executing
+ * `git` sitting inside such a span — `'git'`, `"git"`, `g''it`, and
+ * `sh -c 'git commit'` are all, to the shell, just `git` — vanished from the
+ * count instead of being counted as a second one. A genuine, structurally
+ * eligible `git` earlier in the command then made the whole thing look
+ * "simple" under that undercount, and the hidden one's real directory (often
+ * the session dir, since nothing needed to `cd` for it) went unrepresented in
+ * gitRunDirs' result. Removed rather than patched: the eligibility walk below
+ * now requires the recognised `git`'s segment to be the LAST segment of the
+ * whole command, which closes this off structurally — anything capable of
+ * running a second command, spelled any way at all, has to sit in a later
+ * segment or later in the same one, so the earlier `git` is then not last and
+ * falls back regardless of whether this function ever saw the second one.
+ */
+function isSimpleCommand(command) {
+  const stripped = stripSafeQuotes(command);
+  return !RAW_RISKY_CHARS.test(stripped) && !stripped.includes('<<');
+}
+
+/**
+ * The directory (or directories, when the command can't be trusted to name
+ * just one) that each `git` invocation in `command` actually runs in.
+ *
+ * This replaced a first cut that tracked a single "certain" directory
+ * FORWARD through the token stream, breaking that certainty on any operator
+ * but `&&`. Two review rounds rejected it: each round's fix patched one
+ * shape the walk had failed to model — an `echo cd U` mistaken for a real
+ * `cd`, a `git -C "$VAR"` whose quotes were blanked away by the shared
+ * stripper before this function ever saw them, a bare `env -C`/`pushd`
+ * redirection the walk had no notion of at all — and the next review found
+ * another. The root cause: forward tracking treats "so far, nothing has
+ * broken certainty" as proof of safety, which is only true until the next
+ * shape someone thinks of.
+ *
+ * This is the allowlist that replaced it: the session directory (`cwd`) may
+ * be dropped for a given `git` ONLY when the entire command, start to end,
+ * matches, token for token,
+ *
+ *   (cd LIT &&)* git [-C LIT]... SUBCOMMAND ...
+ *
+ * with NOTHING after it — `cd` and `git` each the very first word of their
+ * segment, segments joined by `&&` alone, every LIT a single clean literal
+ * (isCleanLit) that resolves to a directory that actually exists, nothing
+ * between `git` and the subcommand except repeated `-C LIT` (no `-c`,
+ * `--git-dir`, `--work-tree`, or anything else global git accepts there),
+ * and this `git`'s segment is the LAST segment of the whole command: no
+ * `;`, `&&`, `||`, `|`, `&`, newline or redirect follows it, spelled any way
+ * at all. That last clause is load-bearing on its own, not just one more
+ * shape to recognise: quoting a word does not stop the shell from running
+ * it — `'git' commit -m y` executes exactly like `git commit -m y` — so a
+ * second, real git invocation can hide behind a quote (`'git'`, `"git"`,
+ * `g''it`) or a nested interpreter (`sh -c 'git commit'`) in a way no
+ * amount of better quote-parsing forecloses in general. Requiring the
+ * recognised `git` to be the command's last segment closes that off
+ * structurally instead: anything capable of running a second command has to
+ * sit in a later segment or later in the same one, and either way this
+ * `git` is then not the last segment and falls back. Anything at all
+ * outside the full shape above — for THIS `git`, not just its immediate
+ * neighbour — and the session directory stays a candidate alongside every
+ * other directory the command so much as names (universalFallback). A
+ * caller that denies when ANY candidate is a problem (both gates here do)
+ * fails closed on the shape it does not recognise instead of trusting
+ * whichever directory happened to be cheapest to compute.
+ *
+ * `command` must be the RAW shell text, not `executableShell`'s
+ * quote-blanked output — see isCleanLit's comment for why.
+ *
+ * That precise per-`git` walk runs only when isSimpleCommand(command) says
+ * the raw text is free of the shell features whose handling gitDirTokens
+ * takes on faith. Otherwise every candidate this function could return is
+ * exactly as uncertain as the "not eligible" branch inside the walk below,
+ * so the whole command goes straight to universalFallback instead of trusting
+ * per-git-invocation results built on a tokenization that might have silently
+ * lost a `git` token to an unmatched quote in a comment, a heredoc, or
+ * `$'...'` quoting.
+ *
+ * Returns absolute paths, deduplicated, in the order first reached.
+ */
+function gitRunDirs(command, cwd) {
+  // BRIEF 12 (BRIEF 2 review, accepted open): this used to return each
+  // candidate WITHOUT realpath'ing it, on the theory that findGatedRoot
+  // resolves gated-ness physically itself (via a real git subprocess), so the
+  // TYPED form was good enough for that caller and better for plan-gate's own
+  // marker keying. That theory held for a symlink INTO the middle of a gated
+  // checkout — findGatedRoot's own git subprocess sees through it — but not
+  // for a symlink to a NESTED repo (a vendored checkout under a gated tree's
+  // own vendor/, say): findGatedRoot walks up from whatever directory string
+  // it is handed looking for `.serena/project.yml`, and a symlink's own,
+  // un-dereferenced ancestry never reaches the gated tree that symlink stands
+  // inside of at all. Every candidate is realpath'd here instead, and
+  // plan-gate.cjs no longer depends on the un-resolved form: it derives its
+  // own physically-resolved root independently (repoRootFor) and tries the
+  // session's typed and realpath forms itself when keying a marker, rather
+  // than relying on this function to hand it one un-dereferenced.
+  const start = realOrSelf(path.resolve(cwd));
+  const segments = splitSegments(gitDirTokens(command));
+  if (!isSimpleCommand(command)) return [...universalFallback(segments, start)];
+  let fallback = null;
+  const results = [];
+
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    for (let i = 0; i < seg.tokens.length; i++) {
+      if (seg.tokens[i] !== 'git') continue;
+      const g = gitAt(seg.tokens, i);
+      if (!g) continue; // `git` with nothing recognisable as a subcommand after it
+
+      // `git` must be the first word of its own segment, that segment must
+      // be the LAST segment of the whole command (nothing follows this git
+      // invocation at all — see the grammar comment above for why that is
+      // load-bearing, not just one more shape), and nothing between `git`
+      // and the subcommand except repeated `-C LIT` — gitAt itself is more
+      // tolerant (it also skips `-c`/`--git-dir`/`--work-tree`/etc, so it
+      // can still find the subcommand for gitSubcommandIs elsewhere); the
+      // grammar this function trusts is stricter than what gitAt merely
+      // parses.
+      let eligible = i === 0 && segIdx === segments.length - 1;
+      const cLits = [];
+      for (let j = i + 1; eligible && j < g.at;) {
+        // A `..`-bearing -C literal is refused here on the fast path even
+        // when it is otherwise clean (isCleanLit) — see hasDotDotSegment.
+        if (seg.tokens[j] === '-C' && isCleanLit(seg.tokens[j + 1]) &&
+            !hasDotDotSegment(seg.tokens[j + 1])) {
+          cLits.push(seg.tokens[j + 1]);
+          j += 2;
+        } else {
+          eligible = false;
+        }
+      }
+
+      // Every segment before this one, back to the start of the command,
+      // must be a bare `cd LIT`, joined to what follows it by `&&` alone.
+      // Each step is verified PHYSICALLY (physicalResolve), not merely by
+      // textual path.resolve plus an existence check — a `cd`/`-C` through a
+      // symlink followed by a literal `..` does not cancel out the way plain
+      // string-joining suggests; see physicalResolve's and hasDotDotSegment's
+      // comments. The CANDIDATE pushed below is physicalResolve's own
+      // dereferenced result at each step, not the textual join: a symlink hop
+      // to a NESTED repo (findGatedRoot walks up from whatever it is handed,
+      // and a symlink's own ancestry never reaches what it points INTO) needs
+      // the real directory to be seen as gated at all, and plan-gate.cjs no
+      // longer needs the un-dereferenced form here — it resolves its own
+      // physical root independently and tries the session's typed path
+      // itself when keying a marker.
+      let base = start;
+      for (let k = 0; eligible && k < segIdx; k++) {
+        const s = segments[k];
+        if (segments[k + 1].precededBy !== '&&' || s.tokens.length !== 2 ||
+            s.tokens[0] !== 'cd' || !isCleanLit(s.tokens[1]) ||
+            hasDotDotSegment(s.tokens[1])) { eligible = false; break; }
+        const resolved = physicalResolve(base, s.tokens[1]);
+        if (!resolved) { eligible = false; break; }
+        base = resolved;
+      }
+      for (const lit of cLits) {
+        if (!eligible) break;
+        const resolved = physicalResolve(base, lit);
+        if (!resolved) { eligible = false; break; }
+        base = resolved;
+      }
+
+      if (eligible) { results.push(base); continue; }
+      if (!fallback) fallback = universalFallback(segments, start);
+      for (const d of fallback) results.push(d);
+    }
+  }
+  return [...new Set(results)];
+}
+
 /**
  * Paths a Bash command would WRITE to. Reads (`cat`, `grep`), test runs and
- * `git status` yield nothing. Returns absolute paths.
+ * `git status` yield nothing. Returns absolute paths, deduplicated.
+ *
+ * A RELATIVE target is resolved against every candidate base this command
+ * could plausibly have run in, not only `cwd`: the session's own cwd exactly
+ * as given (not realpath'd), so a target under it keeps the path form the
+ * caller passed in, PLUS every directory `universalFallback` collects —
+ * which always seeds its own output with a realpath'd copy of that same cwd
+ * (`start`), `cd` or no `cd` at all, and then adds one more directory for
+ * each `cd LIT` starting a segment or `-C LIT` anywhere in the command. A
+ * symlinked session cwd therefore yields both the typed and the realpath'd
+ * candidate — fail-safe, not a narrowing: an extra candidate can only add
+ * denials, per Decisions' "`cd` widens the candidate set; it never narrows
+ * it", never allow a write a single candidate would have blocked. This is
+ * `gitRunDirs`' own fail-closed "any candidate blocks" rule, reused here for
+ * the same reason: a `cd` inside the command can otherwise defeat a lookup
+ * made only in the directory the session started in. An ABSOLUTE target is
+ * unaffected — there is only one place it can name.
+ *
+ * Unlike `gitRunDirs`, this caller passes `acceptQuotedLit`/`acceptCdFlags`
+ * to `universalFallback`: a whole, clean QUOTED literal (`quotedLitValue`) is
+ * trusted as a candidate base too, whether it is a `cd`'s own argument or a
+ * `-C` flag's argument, and a `cd` led by `cd --`, `cd -P` or `cd -L` is
+ * trusted the same as a bare `cd LIT`. `gitRunDirs`' strict `-C`/`cd` grammar
+ * above trusts neither: it accepts only the unquoted literal isCleanLit
+ * allows.
  */
 function bashWriteTargets(command, cwd) {
   const targets = [];
+  const seen = new Set();
+  const start = realOrSelf(path.resolve(cwd));
+  const bases = new Set([path.resolve(cwd),
+    ...universalFallback(splitSegments(gitDirTokens(command)), start,
+      { acceptQuotedLit: true, acceptCdFlags: true })]);
   const add = (raw) => {
     if (!raw) return;
     const t = unquote(raw.trim());
     if (!t || t.startsWith('-') || t === '&1' || t === '&2' || t === '/dev/null') return;
     if (t.startsWith('~')) return;              // unexpanded tilde: not a real path
-    const abs = path.isAbsolute(t) ? t : path.resolve(cwd, t);
-    // A write target's directory must already exist. Without this, any path-shaped
-    // token resolves under cwd and appears to live inside the indexed repo.
-    try {
-      if (!fs.existsSync(path.dirname(abs))) return;
-    } catch { return; }
-    targets.push(abs);
+    const push = (abs) => {
+      // A write target's directory must already exist. Without this, any
+      // path-shaped token resolves under some base and appears to live
+      // inside the indexed repo.
+      try {
+        if (!fs.existsSync(path.dirname(abs))) return;
+      } catch { return; }
+      if (seen.has(abs)) return;
+      seen.add(abs);
+      targets.push(abs);
+    };
+    if (path.isAbsolute(t)) { push(t); return; }
+    for (const base of bases) push(path.resolve(base, t));
   };
 
   // Quoted strings are data, not commands: a JSON payload containing `sed -i`
@@ -328,6 +980,22 @@ function bashWriteTargets(command, cwd) {
 //    PowerShell defect this section used to carry for the same character,
 //    which was fixed by making comment-handling part of the quote-aware scan
 //    above instead of a pre-pass blind to quoting.
+//  - A non-literal `cd` (`cd "$X"`, `cd $(pwd)/x`), a subshell's own `cd`
+//    (`( cd U ) && ...`), `pushd`, and PowerShell's `Set-Location` / `sl` /
+//    `Push-Location` are none of them candidate bases: `universalFallback`
+//    only widens the set for a `cd`/`-C` argument `isCleanLit` can trust as
+//    a literal, or (bashWriteTargets only) a whole, clean quoted one
+//    (quotedLitValue). `env -C DIR` is NOT one of these gaps, despite
+//    looking like it should be: its `-C` is the very flag this function
+//    already collects wherever it sits in the command, git's or not.
+//  - A SECOND relative `cd` chained after the first (`cd A && cd B && ...`)
+//    resolves against the SESSION'S cwd, not against A: `universalFallback`
+//    treats each `cd LIT` starting its own segment as its own independent
+//    candidate rather than composing them in sequence, so `cd A && cd B`
+//    adds `<session cwd>/B` as a candidate, never `<session cwd>/A/B`.
+//    The session's cwd, and every other literal directory the command
+//    names, stay candidates regardless — this is the same residual gap
+//    `gitRunDirs` accepts for the commit gate.
 
 /**
  * A plan's "## Known defects — accepted" section: where a blocking audit finding
@@ -494,4 +1162,5 @@ module.exports = {
   SOURCE_EXT, CONFIG_DIR, STATE_DIR, markerPath, gatesDisabled, findGatedRoot,
   isSourceFile, bashWriteTargets, executableShell, deny, readStdin, shipPhase,
   planBody, planBodyHash, acceptedIds, reportFromTranscript, promptFromTranscript,
+  SEPARATOR, tokenize, VALUE_FLAGS, gitAt, gitSubcommandIs, gitRunDirs,
 };

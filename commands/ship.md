@@ -15,6 +15,25 @@ already ambient — on a checkout with a `CLAUDE.md` it is — but a plugin inst
 (autonomy, verification standards, root-cause diagnosis, subagent delegation, planning
 non-trivial work, commit hygiene) back in on invocation.
 
+**`--unattended`, if it is the leading token of `$ARGUMENTS`:** this turn only launches an
+unattended loop and stops — it does not fall through to Step 0 or any phase logic below.
+Run `node ~/.claude/bin/ship-loop-launch.cjs` with the rest of `$ARGUMENTS` passed through
+as flags (for example `/ship --unattended --model fable --plan-model haiku` runs
+`node ~/.claude/bin/ship-loop-launch.cjs --model fable --plan-model haiku`) — resolved the same
+way `~/.claude/hooks/run-state.cjs` is below: `${CLAUDE_PLUGIN_ROOT}/bin/ship-loop-launch.cjs`
+when `CLAUDE_PLUGIN_ROOT` is set, `~/.claude/bin/ship-loop-launch.cjs` otherwise. The script
+lives under `~/.claude`, not under the project being shipped, so it must never be run as a
+path relative to the project's own working directory. That script checks the run
+is ready to proceed without the user (clean tree, on the run's branch, past any gate that
+needs a decision — or this project's `CLAUDE.md` declares standing approval — and usage
+below its pause threshold), refuses and prints which check failed if not, and on success
+writes `.ship-loop/feature` and `.ship-loop/pass-prompt.md`, excludes `.ship-loop/` from
+the worktree, and starts `bin/ship-loop.cjs` detached — one fresh `claude -p "/ship"`
+session per unit of work, re-entering this command's own phase logic one step at a time,
+until it hits a stop condition. Report the PID and log path
+(`.ship-loop/log.md`) it prints, and stop this turn. To stop a launched loop after its
+current pass: `touch .ship-loop/STOP`.
+
 `/ship` is one command run more than once. It reads `phase` from
 its own run out of `~/.claude/state/` and does whatever comes next. The run stops twice
 for the user — once to choose a direction, once to approve the plan — and each `/ship`
@@ -23,10 +42,10 @@ where it left off.
 
 **Step 0, always, before anything else:** `node ~/.claude/hooks/run-state.cjs get`.
 
-(Here and everywhere below, `~/.claude/hooks/run-state.cjs` means
-`${CLAUDE_PLUGIN_ROOT}/hooks/run-state.cjs` when `CLAUDE_PLUGIN_ROOT` is set in the
-environment — installed as a plugin — and `~/.claude/hooks/run-state.cjs` otherwise,
-running from this repo. Same script either way; only the directory changes.)
+(This command's hook scripts live in `${CLAUDE_PLUGIN_ROOT}/hooks`. If that path reads
+as a real absolute path here — installed as a plugin — use it everywhere this file says
+`~/.claude/hooks`; if it still reads as the literal placeholder — running from a
+`~/.claude` checkout — use `~/.claude/hooks` as written.)
 
 If it prints a run with a `feature`, that is this chat's run and its `phase` decides
 which section below applies. If `feature` is `null`, this chat is not driving a run
@@ -49,7 +68,7 @@ conversation is gone and the run is not, which is the whole reason it is on disk
 | `phase` | do this |
 |---|---|
 | no state file, or `finishedAt` set | **Start** — below |
-| `awaiting-direction` | resume at **Gate 1** under Start — the argument (if any) is *read*, not assumed to be assent; if the approaches are still on record in this chat, re-print them and wait, if not, re-derive them (re-run brainstorming) before asking again |
+| `awaiting-direction` | resume at **Gate 1** under Start — the argument (if any) is *read*, not assumed to be assent; if the approaches are still on record in this chat, re-print them and wait, if not, re-derive them (re-run brainstorming) before asking again — unless `planFile` has a `## Diagnosis` section, in which case the run came from `/diagnose` and its approaches are in that file (see **Arriving from `/diagnose`**) |
 | `planning` | resume planning — writing or auditing the plan doc — where it stopped |
 | `awaiting-approval` | bare `/ship` **is** approval — go to Execute; an argument is *read* at that gate per rule 3, not assumed to be approval |
 | `executing` | resume Execute at `currentBrief`, on the run's own `branch` |
@@ -76,7 +95,7 @@ operator on 2026-09-22:
 
    Then print the plan's path, a summary of at most five lines, and the question. The
    user's next `/ship` answers that gate — bare, it is the approval; with an argument it is
-   read per rule 3 below, not assumed to be one. Skip `/plan` entirely — re-planning an
+   read per rule 3 below, not assumed to be one. Skip `/blueprint` entirely — re-planning an
    approved plan produces a second plan document and a second audit, not progress.
 3. **An argument on a run whose `phase` is `awaiting-approval` or `awaiting-direction`**
    → it is *read* as the answer to that gate, not assumed to be one, and never a new
@@ -112,26 +131,30 @@ new idea, never as a gate answer nobody could have been waiting on.
 
 ## Start
 
-Run `/plan` on `$ARGUMENTS` and follow its triage exactly. `/plan` decides between
+Run `/blueprint` on `$ARGUMENTS` and follow its triage exactly. `/blueprint` decides between
 three outcomes and you do not override it. Before doing anything else, print which one
 it picked — "do it now", "iterate in a browser", or "really plan" — so a silently-skipped
 triage is visible to the user; this is a reporting requirement only, not one a hook can
 check, since "do it now" is exactly the outcome that creates no run state for a hook to
 find:
 
-**One gate, and it is this one.** `/plan` has its own direction gate at its Step 2.5.
+**One gate, and it is this one.** `/blueprint` has its own direction gate at its Step 2.5.
 Inside a `/ship` run **that stop does not fire** — `/ship` owns it, as Gate 1 below,
 because `/ship` is what holds the run and its phase and is therefore the only one of the
-two that can record `awaiting-direction` and be resumed at it. Take `/plan`'s Step 2
-approaches, carry them to Gate 1, and stop there once. `/plan`'s Step 2.5 applies when
-`/plan` is typed directly, with no run behind it. Do not stop twice, and do not skip
-Gate 1 on the grounds that `/plan` already asked.
+two that can record `awaiting-direction` and be resumed at it. Take `/blueprint`'s Step 2
+approaches, carry them to Gate 1, and stop there once. `/blueprint`'s Step 2.5 applies when
+`/blueprint` is typed directly, with no run behind it. Do not stop twice, and do not skip
+Gate 1 on the grounds that `/blueprint` already asked.
 
-- **Do it now** — a small, obvious change. Do it, verify it, and stop. Do **not** create
-  a run state, do not write a plan doc, do not brief it. Manufacturing five briefs for a
-  one-line fix is the most expensive failure this command can have.
+- **Do it now** — a small, obvious change: at most 3 files, about 30 changed lines, no
+  design call, a cause that reproduces, and no `Serial:`-class shared resource. Do it,
+  verify it, and stop. Do **not** create a run state, do not write a plan doc, do not brief
+  it. Manufacturing five briefs for a one-line fix is the most expensive failure this
+  command can have. `/quick` is this same lane typed directly, without going through
+  `/blueprint`'s triage first — reach for it by name when you already know the ask is this
+  small.
 - **Iterate in a browser** — visual or taste-driven work. Run the app, drive it, iterate.
-  Plans are the wrong artifact here; `/plan` says so and it is right.
+  Plans are the wrong artifact here; `/blueprint` says so and it is right.
 - **Really plan** — anything else. Continue below.
 
 For the third case only:
@@ -144,7 +167,8 @@ That sets `phase: awaiting-direction` — the run exists and no approach has bee
 On a *fresh* run no plan document exists either; on a run that **dropped back** here from
 `awaiting-approval` because the approach was rejected, `planFile` still names the plan written
 under the old approach. Treat that document as superseded, not as the plan — the next approach
-gets its own. **Ask what this run should be based on**, defaulting to
+gets its own. The one exception is a run `/diagnose` started, whose `planFile` holds the diagnosis
+from the start; see **Arriving from `/diagnose`**. **Ask what this run should be based on**, defaulting to
 the branch the user is on, and record it with
 `node ~/.claude/hooks/run-state.cjs branch --base <branch>` once the branch is made.
 Asking is not optional now that several runs share one checkout: the user stays on one
@@ -152,9 +176,12 @@ branch while driving runs that belong on others, so where they are standing says
 nothing about where the work goes. Several runs may share one integration branch as a
 base, and each opens its PR against it.
 
-Then brainstorm through `superpowers:brainstorming` — two or three approaches with
+Then brainstorm through `/brainstorm` — two or three approaches with
 trade-offs and a recommendation, not one plan presented as inevitable. Say which you
-recommend and why, and what each one forecloses.
+recommend and why, and what each one forecloses. `/brainstorm` stops at the
+recommendation and writes nothing, which is the point: the raw brainstorming skill
+would go on to commit a spec of its own and invoke `writing-plans`, and the plan doc
+here is `/blueprint`'s.
 
 ### Gate 1 — direction
 
@@ -195,14 +222,33 @@ that cannot survive one call is not a record. The plan-doc line above is the onl
 durable trace. Restoring a state-file record would need `blank()`/`normalise()` in
 `run-state.cjs` to learn the field first; that is a separate change, not made here.
 
+### Arriving from `/diagnose`
+
+`/diagnose` hands a fix that needs a decision to `/ship` by starting the run itself, parked at
+`awaiting-direction`, with `planFile` pointing at a document that holds a `## Diagnosis`
+section and a numbered `## Fix approaches` section, and the base already recorded. The user
+answers with `/ship <n>`. Everything in Gate 1 above applies, with three differences:
+
+- **The approaches are in the file.** On a resume without them in the chat, re-print the
+  file's `## Fix approaches` rather than re-brainstorming — brainstorming from the symptom
+  alone throws away the reproduction and the audited root cause.
+- **The plan goes into that same file,** below the two sections, which stay: the diagnosis
+  is the plan's context and the approaches record what was rejected. On a drop-back the
+  diagnosis still stands; only what was written below it is superseded.
+- **The work branch takes the `bugs/` prefix** in Execute.
+
+A `## Diagnosis` section that `plan-auditor` finds false is a defect in the plan like any
+other: the root cause is exactly the claim a fix is built on.
+
 Either way — answered or skipped — continue:
 
 ```
 node ~/.claude/hooks/run-state.cjs phase planning
 ```
 
-and write the plan doc to `docs/plans/YYYY-MM-DD-<topic>.md`. The plan must carry what
-`/plan` requires, including the **Decisions — do not re-litigate** and
+and write the plan doc to `docs/plans/YYYY-MM-DD-<topic>.md` — or, on a run from `/diagnose`,
+into the diagnosis file `planFile` already names. The plan must carry what
+`/blueprint` requires, including the **Decisions — do not re-litigate** and
 **Out of scope — deliberately** sections, and, if Gate 1 was skipped, the line recording
 it.
 
@@ -267,9 +313,18 @@ appears below — do not assign it to a shell variable, which only `sh` understa
 PowerShell does not:
 
 ```
-git worktree add ../<repo>-<kebab-name> -b <prefix>/<kebab-name> <base>
+git fetch origin
+git log --oneline origin/<base>..<base>
+git worktree add ../<repo>-<kebab-name> -b <prefix>/<kebab-name> origin/<base>
 node ~/.claude/hooks/run-state.cjs branch <prefix>/<kebab-name>
 ```
+
+Fetch before forking so the work starts from what the remote has for `<base>` now, not
+from whenever this checkout last pulled — the base is often an integration branch other
+runs are landing on. The `git log` lists commits on the local `<base>` that the remote
+does not have: if it prints any, stop and ask whether the run should include them rather
+than silently dropping or keeping them. If `origin/<base>` does not exist (a base never
+pushed), fork from `<base>` itself.
 
 Work in that worktree for the rest of the run. If it needs a `.env`, symlink the main
 checkout's rather than copying it.
@@ -278,8 +333,8 @@ The prefix follows what the work is, matching the command that would have produc
 
 | the work is | prefix | example |
 |---|---|---|
-| a feature, a change, anything from `/plan` | `feature/` | `feature/descriptor-shortcut` |
-| a defect with a reproduction, from `/bug` | `bugs/` | `bugs/anchor-ordering` |
+| a feature, a change, anything from `/blueprint` | `feature/` | `feature/descriptor-shortcut` |
+| a defect with a reproduction — always so when `/diagnose` handed it over (`planFile` has a `## Diagnosis` section) | `bugs/` | `bugs/anchor-ordering` |
 | an experiment you may well throw away | `spike/` | `spike/jev-classification` |
 
 The base is whatever Start recorded. Do not substitute the default branch and do not
@@ -291,13 +346,15 @@ On a resume `branch` is already set; `git switch` to it rather than creating ano
 `run-state.cjs branch` call refuses a *different* branch on an unfinished run, which is
 the backstop — but do not rely on the backstop, check first.
 
-If `git switch -c` fails because the branch already exists, that is a collision with an
+If `git worktree add -b` fails because the branch already exists, that is a collision with an
 earlier abandoned run. Stop and ask; do not append a suffix and carry on.
 
 1. **`/brief`** against the approved plan, unless `briefFile` already lists briefs for
    this feature — on a resume it will, and re-briefing would renumber work that is
    already committed. `/brief` verifies the real test baseline before writing anything;
    if the baseline it measures disagrees with the plan's, stop and say so.
+   `/brief` ends by printing an opener; that opener is not a stopping point here. Go
+   straight on to step 2 in the same turn.
 
 2. **`/execute`**. It owns the per-brief loop — implementer, reviewer, the two-rejection
    debugger escalation, commit, mark done — and its six termination conditions are

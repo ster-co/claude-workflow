@@ -1,7 +1,7 @@
 # This Claude Code setup
 
 What is installed, what enforces what, and how to check it still works.
-Last substantive change 2026-09-22. Claude Code **2.1.278**, VS Code extension.
+Last substantive change 2026-09-28. Claude Code **2.1.280**, VS Code extension.
 
 **Setting this up on another machine?** This file is a reference, not a procedure —
 start with [`SETUP.md`](SETUP.md) instead: seven ordered steps, each with a command and a
@@ -11,6 +11,13 @@ Design notes and the evidence behind each choice live in `audit/`:
 `2026-09-21-config-improvements.md`, `2026-09-21-orchestrator-plan.md`, and the raw
 research in `audit/research-2026-09-21/` — of which `06-bakeoff-results.md` is the one
 that decided the code-intelligence question.
+
+**Defending this to a colleague, or deciding whether to install it?**
+[`docs/WHY-THIS-WORKFLOW.md`](docs/WHY-THIS-WORKFLOW.md) is the cited, evidence-based case
+for why this is more than `superpowers` plus extra commands — the enforced gates, the plan
+audit, the `/attack` whole-tree pass, and the measurement behind choosing Serena over the
+alternatives, including Claude Code's own native `LSP` tool — each claim sourced to the
+commit or measurement behind it.
 
 ---
 
@@ -27,13 +34,15 @@ config — in two commands and a restart:
 /plugin install workflow-discipline@ster-co
 ```
 
-`ster-co/claude-workflow` above is a placeholder, not a working path — this repository is not yet
-published anywhere `/plugin marketplace add` can reach. Replace it with the real
-`owner/repo` once it is.
+`ster-co/claude-workflow` is real: a private repository colleagues need Read or Triage
+access to (never Write — see `docs/2026-09-24-plugin-rollout-findings.md`). It is a
+promoted export of this repository, not a mirror — `bin/export-to-production.sh --push`
+ships a checked subset, on a release cadence, not on every commit. `SETUP.md` is the
+step-by-step procedure for a new machine.
 
-Then **restart Claude Code.** Plugin `hooks/` and `.mcp.json` are read once at startup,
-not watched — a hook or MCP server change picked up by the install has no effect on the
-running session until it restarts.
+Then **restart Claude Code.** Plugin `hooks/` and `.claude-plugin/mcp.json` are read once
+at startup, not watched — a hook or MCP server change picked up by the install has no
+effect on the running session until it restarts.
 
 `.claude-plugin/plugin.json` declares a dependency on the `superpowers` plugin — the
 five command files under `commands/` invoke four of its skills (`brainstorming`,
@@ -45,9 +54,31 @@ lists that marketplace in `allowCrossMarketplaceDependenciesOn` to permit it; a 
 
 ### Serena — required, not optional
 
-The plugin ships Serena's *config* (`.mcp.json`), not its binary. The MCP server starts
-through `uvx`, and `uvx` must be on `PATH` **before** the first session in any repository
-this workflow is meant to gate:
+The plugin ships Serena's *config* (`.claude-plugin/mcp.json`), not its binary. That config
+starts `bin/serena-relay.cjs` with `node`, and the relay finds or spawns the repository's
+one shared Serena with `uv tool run --from serena-agent serena start-mcp-server`. Each
+repository gets its own shared Serena, one process per repository rather than one per
+session, and the relay routes there: a lookup whose `relative_path` is an absolute path
+into a `/ship` worktree, or into another repository entirely, goes to that repository's own
+Serena — the relay connects to it on first use, joining the server if one is already running
+for that repository or starting it if none is, with results relative to its root. There is
+no per-worktree setup step: before the relay spawns a server for a root with no
+`.serena/project.yml` — a `/ship` worktree, chiefly, since no session ever starts there to
+run the `SessionStart` hook, but this also covers the session's own root the first time
+anything opens it — it writes one itself, with every language that repository actually
+has, reusing the same detection `hooks/repo-setup.cjs` uses rather than leaving Serena to
+autogenerate its own config for just the dominant one. It applies the hook's own
+preconditions first, not just its detection and writing: `CLAUDE_NO_AUTO_REPO_SETUP=1`
+opts a repository out here too, and it will not write a config that points the gates at a
+server it cannot itself start — checked by asking whether the command it is actually about
+to run resolves, since `SERENA_RELAY_SERVER_CMD` can replace `uv` with anything. A path with
+no `.git` or `.serena/project.yml` above it is not a repository at all, and such a lookup is
+refused with an error rather than given a Serena of its own. When the relay writes a
+config into a repository whose `.serena/` is not git-ignored, that file shows as
+untracked, so the relay adds a one-time notice, saying so and how to fix it, to the next
+successful tool call it answers for that repository. `uv`
+(the same install that gives you `uvx`) must be on `PATH` **before** the first session in
+any repository this workflow is meant to gate:
 
 ```
 # Windows
@@ -59,14 +90,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Skip it and the discipline this config exists to enforce simply does not run. Every
 session's `SessionStart` hook (`hooks/repo-setup.cjs`) checks for `uvx` on `PATH` before it
 writes a repository's `.serena/project.yml`; find it missing and it writes nothing, because
-the edit and commit gates key on that file existing (`hooks/gates/gate-lib.cjs`). Without
-`uvx`, no repository ever gets one, so no repository is ever gated — the three
-`mcp__serena__*` symbol tools (`find_referencing_symbols`, `find_implementations`,
-`find_declaration`) the `implementer` agent declares stay unavailable, and there is no
-reference-lookup evidence the edit gate can ever be satisfied with. This is reported, not
-silent: the hook's SessionStart message says `uvx` is missing, that the repository is
-therefore not gated, and how to install it. Install `uvx` and start a new session to have
-`hooks/repo-setup.cjs` write the config the gates need.
+the edit and commit gates key on that file existing (`hooks/gates/gate-lib.cjs`). The relay
+(`bin/serena-relay.cjs`) checks the same way for the repositories it configures — asking
+whether the command it is about to spawn resolves, `uv` by default — so the two paths that
+can write this file agree: without `uv`, no repository ever gets one this way, so no
+repository is ever gated through it — the three `mcp__serena__*` symbol tools
+(`find_referencing_symbols`, `find_implementations`, `find_declaration`) the `implementer`
+agent declares stay unavailable, and there is no reference-lookup evidence the edit gate
+can ever be satisfied with. This is reported, not silent, for the hook's own check: its
+SessionStart message says `uvx` is missing, that the repository is therefore not gated, and
+how to install it (the relay's check is silent on failure — see `bin/serena-relay.cjs`).
+Install `uv` and start a new session to have `hooks/repo-setup.cjs` write the config the
+gates need.
 
 **Unverified, flagged rather than asserted:** Serena's Roslyn language server for C# is
 *believed* to need PowerShell 7+ (`pwsh`) on Windows rather than the Windows PowerShell
@@ -77,7 +112,7 @@ therefore not gated, and how to install it. Install `uvx` and start a new sessio
 
 A plugin cannot ship a `CLAUDE.md` as always-on project context — that channel is not part
 of the plugin system. The operating discipline lives in the `workflow-discipline` skill
-instead, and `/ship` and `/plan` load it explicitly, by name, as the first thing they do,
+instead, and `/ship` and `/blueprint` load it explicitly, by name, as the first thing they do,
 rather than assuming it is ambient. A colleague who installs the plugin gets that
 discipline only on the turns where a command pulls the skill in; working in this repository
 directly, with its root `CLAUDE.md` still in place, gets it on every turn. The two are not
@@ -88,7 +123,7 @@ the same experience — said here rather than left for a colleague to discover o
 ## The shape of it
 
 ```
-you ──/ship "<idea>"──▶ /plan triage
+you ──/ship "<idea>"──▶ /blueprint triage
                              │
                    do-it-now │      2–3 approaches on the table
                    browser   │              │
@@ -129,12 +164,16 @@ and still work alone; `/ship` is what saves you typing four of them in order.
 
 ## Commands
 
+New here? [`docs/COMMANDS.md`](docs/COMMANDS.md) explains each command in plain language,
+including how `/ship` runs the others and how they differ from Claude Code's own built-ins.
+
 | command | argument | what it does |
 |---|---|---|
 | **`/ship`** | idea, then nothing | **The front door.** Stops twice — once to choose a direction, once to approve the plan — then briefs, executes and lands unattended. Reads `phase` from its run under `~/.claude/state/ship-runs/`, so running it twice is the whole interface. |
-| `/plan` | yes | Triages into do-it-now / iterate-in-a-browser / really-plan. For the third: explores, puts up 2–3 approaches, **stops** on the direction, writes the plan doc, **stops** again for approval. |
-| `/bug` | yes | Refuses to diagnose until environment, one-symptom, and observed-vs-expected are settled. Routes to `/plan` if the fix is architectural. |
-| `/brainstorm` | yes | Open-ended exploration for "I don't know what I want yet" — puts up 2–3 approaches with trade-offs, recommends one, stops with a recommendation in chat. Never writes a plan document; hands off to `/plan`. |
+| `/quick` | yes | The fast lane for a small, obvious ask — answer, brainstorm, bug or change — inline, in this session, no plan, no subagents except `scout`. Do-it-now threshold estimated before editing: ≤3 files, ~30 lines, no design call, a reproducible cause, no shared resource outside this checkout. Crossed mid-change, edits stay uncommitted and get reported; escalates to `/diagnose` or `/ship`. |
+| `/blueprint` | yes | Triages into do-it-now / iterate-in-a-browser / really-plan. For the third: explores, puts up 2–3 approaches, **stops** on the direction, writes the plan doc, **stops** again for approval. |
+| `/diagnose` | yes | Refuses to diagnose until environment, one-symptom, and observed-vs-expected are settled. Fixes a simple bug test-first; hands any fix that needs a decision to `/ship`, parked at its direction gate. |
+| `/brainstorm` | yes | Open-ended exploration for "I don't know what I want yet" — puts up 2–3 approaches with trade-offs, recommends one, stops with a recommendation in chat. Never writes a plan document; names `/ship` (build it, on a new branch) or `/blueprint` (plan only) as the next step. `/ship` and `/blueprint` run it for their own brainstorming step. |
 | `/explain` | yes | Explains a subsystem, feature, symbol or change at the altitude the question implies — understanding-oriented, cited `file:line`, answers in chat by default. |
 | `/attack` | optional target and axes | Probes a *standing system* — working tree, diff, branch, merge commit, path, subsystem or repo — along adversarial axes: security, correctness, operational excellence, idempotency, reliability, performance, cost. See below for how this differs from the bundled `code-review` skill. |
 | `/brief` | yes | Turns an approved plan into numbered briefs, verifying the real test baseline first. |
@@ -162,7 +201,7 @@ runs go straight to the registry.)
 
 | phase | `/ship` does | who acts next |
 |---|---|---|
-| no state, or `finishedAt` | `/plan` triage; only a really-plan job creates state | — |
+| no state, or `finishedAt` | `/blueprint` triage; only a really-plan job creates state | — |
 | `awaiting-direction` | prints 2–3 approaches and the question | **you** |
 | `planning` | write `docs/plans/YYYY-MM-DD-*.md` | — |
 | `awaiting-approval` | prints the plan path, ≤5 lines, and the question | **you** |
@@ -219,6 +258,7 @@ Rules in prose get skipped under load. These do not.
 | `Stop` | `verify-gate.cjs` | Refuses to end the turn while a brief is armed and unreviewed. Stands down after 5 blocks (the platform overrides at 8) |
 | `PreCompact` | `checkpoint-write.cjs` | Saves the thread before the context is rewritten. No matcher, so it catches **auto** compaction as well as `/compact` |
 | `SessionStart` all five sources | `checkpoint-restore.cjs` | Session checkpoint for `compact`/`resume`/`clear`, the run-state registry for `startup`/`clear`/`fork` |
+| `SessionStart` `startup` | `worktree-sweep.cjs` | Removes the repo's local worktrees and branches whose PR merged — only when nothing unpushed, uncommitted or in use would be lost; backs up tips, patches and `.env` first. At most hourly per repo; `CLAUDE_NO_WORKTREE_SWEEP=1` disables; `node ~/.claude/hooks/worktree-sweep.cjs --dry-run --repo <path>` shows the plan |
 | `UserPromptSubmit` | `discipline-reminder.cjs` | Re-injects the rules that decay by turn forty; clears the per-turn gate markers |
 
 **Escape hatch:** `SKIP_CODE_GATES=1`.
@@ -301,10 +341,19 @@ start/end markers, deleted the skill directory that tool had installed, and untr
 root agent docs across every repo. That migration is finished and the script is gone — it
 was scoped to that one sweep and had nothing left to run against once every repo was clean.
 
-**Serena ships `language_servers: [python]`** and silently reports every other language as
+**A repository with no `.serena/project.yml` at all gets one Serena autogenerates itself, and
+it lists only the dominant language** (Serena 1.7.0, `ProjectConfig.autogenerate`, called
+only when the file does not yet exist) — and silently reports every other language as
 "ignored" — the failure message names the wrong cause. Without the `typescript` entry, a
-`find_referencing_symbols` over `frontend/*.js` returns nothing rather than erroring.
-**Config changes need a new session**; the server reads its project config once at startup.
+`find_referencing_symbols` over `frontend/*.js` returns nothing rather than erroring. This is
+what `repo-setup.cjs` (every repository a session starts in) and `bin/serena-relay.cjs`
+(every other repository, including a `/ship` worktree, that a routed call reaches first) both
+write ahead of, with the full language mix instead of just the largest slice of it.
+**The server reads its project config once, at startup.** When `repo-setup.cjs` writes the
+file, it stops the repository's shared Serena, and each session's relay starts a new one that
+reads it. An edit you make by hand takes effect when that shared server next starts, which
+is after every session using it — in that repository or routed there from another — has
+closed.
 
 ---
 
@@ -367,7 +416,7 @@ testing `git check-ignore` directly.
 
 | | |
 |---|---|
-| **MCP servers** | `serena` (global, stdio, `--project-from-cwd`) |
+| **MCP servers** | `serena` (user scope, stdio: `node ~/.claude/bin/serena-relay.cjs` — the shell expands `~` when the entry is added, so the stored path is absolute, matching SETUP step 5 — a relay to one shared Serena per repository). It serves every repository, this one included: the repo's `.mcp.json` declares no `serena`, so without the plugin or this entry there is no Serena. See SETUP.md step 5 |
 | **Plugins** | `superpowers`, `pyright-lsp`, `typescript-lsp`, `playwright`, `frontend-design`, `azure`, `microsoft-docs` |
 | **Marketplaces** | official, plus `microsoft/skills` |
 | **Output style** | Concise |

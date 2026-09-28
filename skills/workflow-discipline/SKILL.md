@@ -147,6 +147,21 @@ description: The default operating discipline for any non-trivial engineering ta
   never on "find me the file".
 - Treat subagent conclusions as evidence to evaluate, not automatically correct answers.
 
+## Links and paths
+
+- A link you give **in chat or in a report** points at an absolute path, e.g.
+  `[plan.md](/home/<you>/repo/docs/plans/x.md#L42)`. The chat is often not running in that
+  worktree or on that branch, and a relative link resolves against whatever directory the
+  reader is in. Only the link target has to be absolute; the visible text can stay short.
+- **Committed files stay portable**: a plan, brief, command or PR body refers to repo files
+  by repo-relative path and never hard-codes a user's home or checkout directory. An
+  absolute path committed to the repo is wrong on every other machine.
+- A file on a branch that is not checked out anywhere has no path to link; name it as
+  `<branch>:<path>` so `git show` can open it.
+- A chat client can only open files inside the session's working directories. A link into
+  a worktree outside them resolves but will not open until that directory is added
+  (`/add-dir`, or `additionalDirectories` in settings to make it stick).
+
 ## Code comments
 
 - Comment code the way a careful engineer normally would: explain *why* non-obvious
@@ -209,7 +224,7 @@ document, not a dropdown — for UI iteration, run the app and iterate against i
 directly.
 
 If planning and brainstorming skills are available in this environment (this repo ships
-its own `/plan` command, which covers the same ground and adds a plan-gate and an
+its own `/blueprint` command, which covers the same ground and adds a plan-gate and an
 audit step), use them; if not, follow the shape above by hand — the artifact matters
 more than the mechanism.
 

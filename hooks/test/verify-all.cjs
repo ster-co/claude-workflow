@@ -43,7 +43,7 @@ function hookCommandPath(command) {
 
 let rc = 0;
 
-// --- hook behaviour: the 7 unit suites -------------------------------------
+// --- hook behaviour: the 8 unit suites -------------------------------------
 // A pipeline's exit status is the LAST command's. The bash version once ran
 // these as `node test.cjs | tail -2`, which reported tail's status -- always
 // 0 -- so a red unit test could not fail the script. It reported success over
@@ -69,7 +69,12 @@ unit('test-verify-checkpoint.cjs');
 unit('test-run-state-registry.cjs');
 unit('test-agent-log.cjs');
 unit('test-repo-setup.cjs');
+unit('test-worktree-sweep.cjs');
 unit('test-test-delta.cjs');
+unit('test-serena-registry.cjs');
+unit('test-serena-relay.cjs');
+unit('test-ship-loop.cjs');
+unit('test-ship-loop-launch.cjs');
 
 // --- settings.json is valid and wired ---------------------------------------
 console.log();
@@ -137,7 +142,13 @@ console.log('== settings.json is valid and wired ==');
   for (const [ev, entries] of Object.entries(s.hooks)) {
     for (const e of entries) {
       for (const hk of e.hooks) {
-        const p = hookCommandPath(hk.command);
+        // settings.json names the install location ($HOME/.claude/...), but the
+        // question here is whether the checkout under test ships the script: a
+        // worktree adding a new hook would otherwise fail until it is merged and
+        // installed. Map the install root onto this checkout before looking.
+        const installRoot = path.join(os.homedir(), '.claude') + path.sep;
+        const raw = hookCommandPath(hk.command);
+        const p = raw && raw.startsWith(installRoot) ? path.join(ROOT, raw.slice(installRoot.length)) : raw;
         if (p && !fs.existsSync(p)) missingFiles.push(`${ev}:${p}`);
       }
     }
@@ -188,18 +199,36 @@ console.log('== settings.json is valid and wired ==');
   // test-delta is called by commands rather than wired to an event, so the
   // way it dies is a command quietly dropping the line. claude-repo-setup.sh
   // sat unrun for a day on exactly that failure mode.
-  const callers = [['land.md', 'test-delta'], ['execute.md', 'test-delta']];
+  const callers = [['land.md', 'test-delta.cjs --command'], ['execute.md', 'test-delta.cjs --command']];
   const missingCallers = callers.filter(([c, tok]) =>
     !fs.readFileSync(path.join(COMMANDS, c), 'utf8').includes(tok)).map(([c]) => c);
   if (missingCallers.length) { fail(`these commands no longer run the test delta: ${pyList(missingCallers)}`); return; }
   console.log(`  ok   the test delta is still called by ${callers.length} commands`);
 
+  // /diagnose hands a fix that needs a decision to /ship by starting the run itself and
+  // stopping at /ship's direction gate. It cannot invoke /ship -- both are outermost,
+  // per the invocability split below -- so the run state IS the hand-off. A /diagnose that
+  // stops writing it goes back to fixing inline with no gate, and nothing else notices;
+  // a /ship that stops reading the diagnosis re-brainstorms from nothing on resume.
+  // One token per step, each on its own line in the command, so deleting any one
+  // step turns this red rather than leaving a sibling token to match.
+  const handoff = [
+    ['diagnose.md', 'start --feature <kebab-summary> --phase awaiting-direction'],
+    ['diagnose.md', 'phase awaiting-direction --plan docs/plans/'],
+    ['diagnose.md', 'branch --base'],
+    ['ship.md', '### Arriving from `/diagnose`'],
+  ];
+  const lostSteps = handoff.filter(([c, tok]) =>
+    !fs.readFileSync(path.join(COMMANDS, c), 'utf8').includes(tok)).map(([c, tok]) => `${c}: ${tok}`);
+  if (lostSteps.length) { fail(`the /diagnose -> /ship hand-off lost a step: ${pyList(lostSteps)}`); return; }
+  console.log(`  ok   /diagnose still hands a decision-sized fix to /ship (${handoff.length} checked)`);
+
   // An adversary that a command stops dispatching disappears silently: the
   // command still runs, the step is simply gone, and nothing reports a
   // missing audit.
   const wiring = [
-    ['plan.md', 'plan-auditor'],
-    ['bug.md', 'root-cause-auditor'],
+    ['blueprint.md', 'plan-auditor'],
+    ['diagnose.md', 'root-cause-auditor'],
     ['execute.md', 'reviewer'],
   ];
   // Skills are model-invoked rather than dispatched by a command, so there is
@@ -216,25 +245,71 @@ console.log('== settings.json is valid and wired ==');
   if (missingWiring.length) { fail(`adversary wiring or missing skills: ${pyList(missingWiring)}`); return; }
   console.log(`  ok   every command still dispatches its adversary (${wiring.length} checked) and every skill is on disk (${skills.length} checked)`);
 
+  // /blueprint and /ship brainstorm through /brainstorm, never the raw
+  // superpowers:brainstorming skill. Left to itself that skill ends by writing
+  // and committing a spec under docs/superpowers/specs/ and invoking
+  // writing-plans -- a second design document and a second approval loop next
+  // to the plan doc and gates these commands own. /brainstorm is the one place
+  // that stops the skill before that step.
+  const brainstormers = ['blueprint.md', 'ship.md'];
+  const rawBrainstorm = brainstormers.filter((c) => {
+    const text = fs.readFileSync(path.join(COMMANDS, c), 'utf8');
+    return text.includes('superpowers:brainstorming') || !text.includes('`/brainstorm`');
+  });
+  if (rawBrainstorm.length) { fail(`these commands brainstorm through the raw skill instead of /brainstorm: ${pyList(rawBrainstorm)}`); return; }
+  console.log(`  ok   ${brainstormers.length} commands brainstorm through /brainstorm`);
+
+  // Under a plugin install no CLAUDE.md reaches the session, so a command that
+  // changes code or history is the only thing that can pull the discipline in.
+  // One that stops naming the skill runs without it, and nothing else notices.
+  const disciplined = ['blueprint.md', 'ship.md', 'diagnose.md', 'brief.md', 'execute.md', 'land.md', 'quick.md'];
+  const undisciplined = disciplined.filter((c) =>
+    !fs.readFileSync(path.join(COMMANDS, c), 'utf8').includes('load the `workflow-discipline` skill'));
+  if (undisciplined.length) { fail(`these commands no longer load workflow-discipline: ${pyList(undisciplined)}`); return; }
+  console.log(`  ok   ${disciplined.length} commands load workflow-discipline on invocation`);
+
+  // /ship forks its work branch from the recorded base. Without a fetch first
+  // that is whatever this checkout last pulled, and the PR opens already behind.
+  const shipText = fs.readFileSync(path.join(COMMANDS, 'ship.md'), 'utf8');
+  const fetchAt = shipText.indexOf('git fetch origin');
+  const forkAt = shipText.indexOf('git worktree add');
+  if (fetchAt < 0 || fetchAt > forkAt || !/git worktree add .* origin\/<base>/.test(shipText)) {
+    fail('ship.md no longer fetches before forking its worktree off origin/<base>'); return;
+  }
+  console.log('  ok   /ship fetches before forking its worktree off origin/<base>');
+
+  // /brief ends by printing an opener for the user to paste. Inside a /ship run that
+  // opener is not a stopping point -- /ship goes straight on to /execute in the same
+  // turn. Without an explicit carve-out on both sides, the model obeys /brief's
+  // "nothing else after it", prints `/execute ...`, and the run stalls after briefing.
+  const continuation = [
+    ['brief.md', 'Inside a `/ship` run, the opener is not a stop'],
+    ['ship.md', 'is not a stopping point here'],
+  ];
+  const lostContinuation = continuation.filter(([c, tok]) =>
+    !fs.readFileSync(path.join(COMMANDS, c), 'utf8').includes(tok)).map(([c, tok]) => `${c}: ${tok}`);
+  if (lostContinuation.length) { fail(`/ship could stall after /brief prints its opener: ${pyList(lostContinuation)}`); return; }
+  console.log(`  ok   /ship continues from /brief into /execute without stopping (${continuation.length} checked)`);
+
   // disable-model-invocation is right for what the USER types and wrong for
   // what a command calls. /ship's own text says "run /brief" and "/execute"
   // -- if those carry the flag, /ship reaches its approval gate and can go
   // no further, because the model executing /ship is the thing that has to
   // invoke them.
-  // The axis is NOT "does the user type it" -- /plan is typed AND called by
-  // /ship and /bug. It is "is it ever invoked by another command": if yes it
+  // The axis is NOT "does the user type it" -- /blueprint is typed AND called by
+  // /ship. It is "is it ever invoked by another command": if yes it
   // must be model-invokable, because the model executing the caller is what
   // invokes it.
-  const OUTERMOST = ['ship', 'bug', 'attack', 'handoff']; // nothing calls these
-  const CALLED = ['plan', 'brief', 'execute', 'land']; // another command invokes these
+  const OUTERMOST = ['ship', 'diagnose', 'attack', 'handoff', 'quick']; // nothing calls these
+  // /blueprint and /ship run /brainstorm as their brainstorming step.
+  const CALLED = ['blueprint', 'brief', 'execute', 'land', 'brainstorm']; // another command invokes these
   // OPEN: no side effects, nothing calls them, and they must stay
-  // model-invokable on purpose so /plan, /bug and similar callers remain free
-  // to reach for them later. Without this list, briefs 2 and 3's central
-  // frontmatter requirement -- that explain.md and brainstorm.md omit
-  // disable-model-invocation -- is guarded by nothing: adding the flag to
-  // either would leave OUTERMOST and CALLED both satisfied and the suite
-  // green.
-  const OPEN = ['explain', 'brainstorm'];
+  // model-invokable on purpose so /blueprint, /diagnose and similar callers remain free
+  // to reach for them later. Without this list, the frontmatter requirement
+  // that explain.md omit disable-model-invocation is guarded by nothing:
+  // adding the flag would leave OUTERMOST and CALLED both satisfied and the
+  // suite green.
+  const OPEN = ['explain'];
   const flagged = (n) => fs.readFileSync(path.join(COMMANDS, `${n}.md`), 'utf8')
     .split('---')[1].includes('disable-model-invocation: true');
   const bad = [];
@@ -243,6 +318,68 @@ console.log('== settings.json is valid and wired ==');
   for (const n of OPEN) if (flagged(n)) bad.push(`${n}.md has no side effects and must stay model-invokable`);
   if (bad.length) { fail(`command invocability split: ${pyList(bad)}`); return; }
   console.log(`  ok   invocability split holds (${OUTERMOST.length} outermost, ${CALLED.length} called, ${OPEN.length} open)`);
+
+  // A command file named after a Claude Code built-in can be taken over by it.
+  // In the desktop app, typing /bug debugged the session and /plan switched on
+  // plan mode -- neither ever ran commands/bug.md or commands/plan.md -- which is
+  // why those commands are /diagnose and /blueprint. The CLI and VS Code run the
+  // user's file instead, but a name has to work on every surface. Names read out
+  // of the Claude Code 2.1.280 binary (built-in commands, their aliases, and
+  // bundled skills); extend the list when a release adds one.
+  const BUILTINS = [
+    'add-dir', 'agents', 'batch', 'branch', 'bug', 'clear', 'compact', 'config', 'context',
+    'copy', 'debug', 'design', 'diff', 'doctor', 'effort', 'exit', 'export', 'fast',
+    'feedback', 'fork', 'goal', 'help', 'hooks', 'init', 'login', 'logout', 'loops', 'mcp',
+    'memory', 'model', 'permissions', 'plan', 'plugin', 'recap', 'rename', 'resume', 'run',
+    'session', 'settings', 'share', 'skills', 'status', 'stop', 'tasks', 'theme',
+    'ultraplan', 'ultrareview', 'update', 'usage', 'version', 'workflows',
+  ];
+  // /brief is not in the list: its built-in (a brief-only-mode toggle) is off
+  // unless a feature flag enables it, and typing /brief ran commands/brief.md in
+  // the desktop app, the CLI and VS Code alike.
+  const shadowed = fs.readdirSync(COMMANDS).filter((f) => f.endsWith('.md'))
+    .map((f) => f.slice(0, -3))
+    .filter((n) => BUILTINS.includes(n));
+  if (shadowed.length) { fail(`these commands share a name with a Claude Code built-in, which the desktop app runs instead: ${pyList(shadowed)}`); return; }
+  console.log(`  ok   no command shares a name with a Claude Code built-in (${BUILTINS.length} names checked)`);
+})();
+
+// --- ${CLAUDE_PLUGIN_ROOT} convention is stated wherever ~/.claude/hooks/ is used ---
+// Command, agent and skill markdown ships inside the plugin too, where
+// CLAUDE_PLUGIN_ROOT is never an env var the model's Bash tool can read -- it is
+// substituted inline into the file's own text before the model ever sees it.
+// A file that tells the reader `~/.claude/hooks/<script>.cjs` without also
+// stating the `${CLAUDE_PLUGIN_ROOT}/hooks` substitution leaves a plugin
+// install with no documented way to find its own scripts, and silently falls
+// back to running whatever (if anything) lives at the reader's own ~/.claude.
+console.log();
+console.log('== ${CLAUDE_PLUGIN_ROOT} convention accompanies every ~/.claude/hooks/ mention ==');
+(function pluginRootConvention() {
+  const dirs = [COMMANDS, AGENTS, SKILLS];
+  const files = [];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    (function walk(d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.md')) files.push(p);
+      }
+    })(dir);
+  }
+  const missing = [];
+  for (const f of files) {
+    const text = fs.readFileSync(f, 'utf8');
+    if (text.includes('~/.claude/hooks/') && !text.includes('${CLAUDE_PLUGIN_ROOT}/hooks')) {
+      missing.push(path.relative(ROOT, f));
+    }
+  }
+  if (missing.length) {
+    rc = 1;
+    console.log(`  FAIL these files mention ~/.claude/hooks/ without stating the \${CLAUDE_PLUGIN_ROOT}/hooks convention: ${missing.join(', ')}`);
+  } else {
+    console.log(`  ok   every file mentioning ~/.claude/hooks/ also states the \${CLAUDE_PLUGIN_ROOT}/hooks convention (${files.length} files checked)`);
+  }
 })();
 
 // --- hooks.json does not drift from settings.json ----------------------------
@@ -311,6 +448,73 @@ console.log('== hooks.json (the plugin) matches settings.json (this repo) ==');
   console.log(`  ok   hooks.json mirrors settings.json across ${events.length} events (same matcher+script pairs)`);
 })();
 
+// --- serena: the plugin starts the relay, project scope stays out of it -------
+// Probed on Claude Code 2.1.280 with `claude mcp list`:
+// - Plugin scope loads the root .mcp.json, then each file plugin.json names
+//   under mcpServers; a later serena replaces an earlier one. It substitutes
+//   the plain `${CLAUDE_PLUGIN_ROOT}` with the plugin root, but the
+//   `${CLAUDE_PLUGIN_ROOT:-d}` form gives d, and a relative path resolves
+//   against the session's cwd, which for the plugin is some other repository.
+// - Project scope (the root .mcp.json, for sessions in this repo) must not
+//   declare serena at all. It has only environment expansion, in Claude Code's
+//   own environment, and the server's CLAUDE_PROJECT_DIR and cwd are both the
+//   directory the session started in. So no path written there reaches the
+//   relay from a subdirectory. Project scope also outranks user scope, so a
+//   serena there would shadow the user-scope entry, whose shell-expanded
+//   absolute path works from anywhere.
+// The plugin's effective entry is resolved the way the plugin loader would and
+// checked on the filesystem: a regex over the string would pass a path to a
+// relay that does not exist, and a `:-.` path that only works in this repo.
+// A serena entry that fails to start takes the edit gate's required reference
+// lookups with it.
+console.log();
+console.log('== serena: the plugin starts the relay, project scope does not declare it ==');
+(function serenaRelayEntry() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; };
+  const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
+  // An MCP config file loads either as {"mcpServers": {...}} or as the bare map.
+  const serversIn = (json) => (json && typeof json.mcpServers === 'object' ? json.mcpServers : json) || {};
+
+  let rootEntry, pluginEntry;
+  try {
+    // The root .mcp.json is optional; the plugin loader skips a missing one.
+    rootEntry = fs.existsSync(path.join(ROOT, '.mcp.json')) ? serversIn(readJson('.mcp.json')).serena : undefined;
+    pluginEntry = rootEntry;
+    const manifest = readJson(path.join('.claude-plugin', 'plugin.json'));
+    for (const shape of [].concat(manifest.mcpServers || [])) {
+      const servers = typeof shape === 'string' ? serversIn(readJson(shape)) : shape;
+      if (servers.serena) pluginEntry = servers.serena;
+    }
+  } catch (e) {
+    fail(`could not read the serena MCP configs: ${e.message}`);
+    return;
+  }
+
+  if (rootEntry) {
+    fail(`project scope: the root .mcp.json declares serena (${JSON.stringify([rootEntry.command, ...(rootEntry.args || [])])}); ` +
+      'it breaks sessions started in a subdirectory and shadows the user-scope entry');
+  } else {
+    console.log('  ok   project scope: the root .mcp.json does not declare serena');
+  }
+
+  // A directory that does not exist stands in for the other repository the
+  // plugin runs in, so no relative path can resolve there by accident.
+  const otherRepo = path.join(os.tmpdir(), 'serena-relay-check-other-repo');
+  if (!pluginEntry) { fail('plugin scope: no serena entry'); return; }
+  const script = (pluginEntry.args || [])[0];
+  if (pluginEntry.command !== 'node' || typeof script !== 'string') {
+    fail(`plugin scope: serena runs ${JSON.stringify([pluginEntry.command, ...(pluginEntry.args || [])])}, not \`node <relay>\``);
+    return;
+  }
+  const expanded = script.replace(/\$\{CLAUDE_PLUGIN_ROOT(?::-([^}]*))?\}/g,
+    (m, dflt) => (dflt !== undefined ? dflt : ROOT));
+  if (expanded.includes('${')) { fail(`plugin scope: serena's relay path ${script} keeps an unexpanded variable`); return; }
+  const resolved = path.resolve(otherRepo, expanded);
+  if (path.basename(resolved) !== 'serena-relay.cjs') { fail(`plugin scope: serena starts ${resolved}, not serena-relay.cjs`); return; }
+  if (!fs.existsSync(resolved)) { fail(`plugin scope: serena's relay path ${script} resolves to ${resolved}, which does not exist`); return; }
+  console.log(`  ok   plugin scope: serena starts ${script} -> ${path.relative(ROOT, resolved)}, which exists`);
+})();
+
 // --- the plan gate's contract with its own documentation --------------------
 console.log();
 console.log("== the plan gate's contract with its own documentation ==");
@@ -319,12 +523,12 @@ console.log("== the plan gate's contract with its own documentation ==");
   // parse them. Four of the frontend gates in the demo repo were caught
   // going green over broken behaviour because they matched text instead of
   // running it, so this block RUNS the real parsers against the exact
-  // strings plan.md and plan-auditor.md publish.
+  // strings blueprint.md and plan-auditor.md publish.
   const lib = require(path.join(HOOKS, 'gates', 'gate-lib.cjs'));
   const bad = [];
 
   // 1. The acknowledgement heading the docs publish must be the one the gate reads.
-  for (const f of ['commands/plan.md', 'agents/plan-auditor.md']) {
+  for (const f of ['commands/blueprint.md', 'agents/plan-auditor.md']) {
     const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
     const headings = [...text.matchAll(/##[^\n`]*Known defects[^\n`]*/g)].map((m) => m[0].trim());
     if (!headings.length) { bad.push(`${f} no longer publishes a "## Known defects" heading`); continue; }

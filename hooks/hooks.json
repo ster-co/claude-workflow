@@ -22,6 +22,17 @@
             "timeout": 40
           }
         ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/worktree-sweep.cjs"],
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -56,6 +67,17 @@
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/gates/plan-gate.cjs"]
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/gate-arm.cjs"],
+            "timeout": 10
           }
         ]
       }

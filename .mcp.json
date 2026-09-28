@@ -1,11 +1,4 @@
 {
-  "//": "Serena gives code-intelligence tools (find_referencing_symbols, find_implementations, find_declaration) that the edit gate requires before touching a gated repo. Requires `uvx` on PATH — this file ships the config, not the uv/uvx binary itself. The dashboard stays enabled (Serena's own --help recommends always enabling it) but --open-web-dashboard False stops it from popping a browser tab on every session start.",
-  "mcpServers": {
-    "serena": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "serena-agent", "serena", "start-mcp-server", "--context", "claude-code", "--project-from-cwd", "--open-web-dashboard", "False"],
-      "env": {}
-    }
-  }
+  "//": "Deliberately declares no serena. Serena reaches sessions through bin/serena-relay.cjs, which joins or starts one shared Serena per repository. The plugin declares it in .claude-plugin/mcp.json with a ${CLAUDE_PLUGIN_ROOT} path. Sessions in this repository without the plugin get it from the user-scope entry `claude mcp add serena -s user -- node ~/.claude/bin/serena-relay.cjs` (SETUP.md step 5). A serena here would be project scope. That scope expands variables only from Claude Code's own environment, and the server's CLAUDE_PROJECT_DIR and cwd are both the directory the session started in. So a path here cannot reach the relay from a subdirectory. Project scope also outranks user scope, so the broken entry would shadow the working one. hooks/test/verify-all.cjs fails if serena is added back here.",
+  "mcpServers": {}
 }

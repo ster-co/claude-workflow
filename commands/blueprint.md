@@ -1,19 +1,24 @@
 ---
 description: Front door for a feature or a big fix — triage it, brainstorm options, stop on the direction, write the plan doc, stop at the approval gate.
 argument-hint: [what you want to build or change]
-# Model-invokable on purpose. /plan is both typed by the user and invoked by
-# /ship's Start step and /bug step 8, so blocking it severs those chains -- /ship
+# Model-invokable on purpose. /blueprint is both typed by the user and invoked by
+# /ship's Start step, so blocking it severs that chain -- /ship
 # reaches its first instruction and stops. Of the commands a caller invokes this
 # is the least dangerous: it writes a plan doc and run state, and commits nothing.
+# Named /blueprint, not /plan, on purpose. Claude Code has a built-in /plan, and
+# in the desktop app typing /plan switches on plan mode instead of running this
+# file. Do not recreate commands/plan.md: a branch that still edits it or says
+# /plan should carry those edits here and say /blueprint. verify-all.cjs fails
+# on any command named after a built-in.
 ---
 
-Plan: **$ARGUMENTS**
+Blueprint: **$ARGUMENTS**
 
 **Before anything else, load the `workflow-discipline` skill** (by name — in this
 repo it lives at `skills/workflow-discipline/SKILL.md`) — the triage below, and everything downstream of
 it, assumes that operating discipline is already in context. On a checkout with a
 `CLAUDE.md` it is; on a plugin install there is no `CLAUDE.md` reaching the session, so
-this is the point where `/plan` pulls it back in.
+this is the point where `/blueprint` pulls it back in.
 
 This is the step before `/brief`. It ends with a plan document and **your approval**, not with
 code. Nothing downstream re-examines the plan, so the gates below — direction in Step 2.5,
@@ -23,7 +28,7 @@ then approval at the end — are the ones that have to hold.
 
 | the work is | route |
 |---|---|
-| **one obvious change**, a few files, no design call | Do it now. Do not plan it. Finish with `/land`. Say that is what you are doing. |
+| **at most 3 files and about 30 changed lines**, no design call, a cause that reproduces (for a bug), and no `Serial:`-class resource (a deploy, a migration, a production tenant) | Do it now. Do not plan it. Run the `/quick` procedure: classify, follow one path, run the related tests, read the diff, commit on a non-default branch, do not push. |
 | **visual or taste-driven** — layout, spacing, copy, "make it cleaner" | **Do not plan it.** Run the app, drive a real browser, iterate in one session. `3d017c63` ran two brainstorms, a `writing-plans`, a design doc and three Explore agents on a dropdown layout and committed **nothing**, ending on the bare word *"continue?"*. Brainstorming a dropdown produces a document, not a dropdown. |
 | **"will it break when combined" — a merge, a move, a dependency upgrade** | **Build a throwaway worktree first**, then write the plan from what it measured. On the LYHYT engine merge a spike at `/tmp/spike-merge` disproved three risks that three consecutive plan revisions had asserted, settled the nested-vs-sibling layout by hitting the namespace-package hazard, and produced all five real blockers. Revisions cannot falsify a risk; running it can. |
 | **a subsystem, a migration, a change spanning files or repos, or a bug whose fix is bigger than one session** | Continue below. |
@@ -34,10 +39,13 @@ produce two commits.
 
 ## Step 2 — Brainstorm. Explore the real state first.
 
-Use `superpowers:brainstorming`. Before proposing anything, establish what is actually there:
-read the code, run the thing, check the data. Use `mcp__serena__find_referencing_symbols` and
-`query` on the symbols this would touch and report the blast radius now, while it is still cheap
-to change direction.
+Run `/brainstorm` on the request. It is the brainstorming skill with a hard stop: it explores,
+puts up approaches and a recommendation, and ends there. The raw skill, left to itself, ends
+by committing a spec under `docs/superpowers/specs/` and invoking `writing-plans` — a second
+design document and a second approval loop beside the plan doc and gates this command owns.
+Before proposing anything, establish what is actually there: read the code, run the thing,
+check the data. Use `mcp__serena__find_referencing_symbols` and `query` on the symbols this
+would touch and report the blast radius now, while it is still cheap to change direction.
 
 Then put up **two or three approaches with their trade-offs**, not one plan presented as
 inevitable. Say which you recommend and why. Name what each one forecloses.
@@ -66,9 +74,9 @@ This mirrors the plan's own `## Known defects — accepted` pattern below: the s
 allowed, but it leaves a trace instead of vanishing, so how often it fires can be counted
 later — by grepping committed plans — rather than assumed.
 
-**When `/plan` is being driven by a `/ship` run, this step does not fire.** `/ship` owns
+**When `/blueprint` is being driven by a `/ship` run, this step does not fire.** `/ship` owns
 the direction gate — it calls it Gate 1 — and this step is the standalone equivalent, for
-when `/plan` is typed directly with no run behind it. `/ship` owns it because `/ship` holds
+when `/blueprint` is typed directly with no run behind it. `/ship` owns it because `/ship` holds
 the run and its phase, so it is the only one of the two that can record
 `awaiting-direction` and be resumed at it; a stop here as well would ask the same question
 twice in one run. Hand your Step 2 approaches up to `/ship` and continue to Step 3 when it
@@ -201,26 +209,26 @@ Agent(subagent_type: "plan-auditor",
                design this plan was revised through>.")
 ```
 
-It verifies every claim against the repository, flags uncited ones, and flags **stale
-premises** — tasks, mitigations and decisions that only made sense under an architecture
-that no longer holds. It does not judge whether the plan is good; that is your job and
-the user's.
+It verifies load-bearing claims against the repository — the ones a task, a decision's
+reason, or a `Done when` rests on — flags uncited ones, and flags **stale premises**:
+tasks, mitigations and decisions that only made sense under an architecture that no longer
+holds. It does not judge whether the plan is good; that is your job and the user's.
 
 **Give it the path and the premises, and nothing else.** It does not get the conversation
 that produced the plan, and that is the point: the plan's wrong claims came from a chain of
 reasoning, and an auditor handed that reasoning inherits the same premises and confirms the
 same errors. The repository is its only authority.
 
-Fix every defect it reports, then re-run it. Editing the plan invalidates the previous
-audit by design, because the edit is exactly where a fresh false claim enters.
+Editing the plan invalidates the previous audit by design, because the edit is exactly
+where a fresh false claim enters.
 
 Act on the verdict, do not file it. It comes in three:
 
 | verdict | what it means | what you do |
 |---|---|---|
 | **CLEAN** | nothing found | Say what it checked. A clean audit that cannot name what it attacked has told you nothing. |
-| **MINOR** | citation drift only — the facts are right, the pointers are off | Fix what is cheap, commit either way. The gate does not hold a plan out of the repository over a line number. |
-| **DEFECTS** | at least one blocking defect | Fix the false claims, or delete the tasks that rested on them — a task whose premise was wrong is usually not a task to re-word. |
+| **MINOR** | citation drift only — the facts are right, the pointers are off | Record each finding under `## Known defects — accepted` as its id plus a one-line summary, with no fix instructions — that section is excluded from the audit hash, so writing it does not invalidate the audit. Commit either way; the gate does not hold a plan out of the repository over a line number. No round follows a MINOR. |
+| **DEFECTS** | at least one blocking defect | Fix the false claims, or delete the tasks that rested on them — a task whose premise was wrong is usually not a task to re-word. If you edited the plan to do so, dispatch a **delta round**, below, to check the fix. If instead every blocking id is recorded under `## Known defects — accepted` and nothing else changed, no delta round: `plan-gate.cjs` accepts a DEFECTS verdict once every blocking id it named is listed there, the same path it allows for a carried MINOR. |
 
 **A blocking defect you have decided not to fix goes in the plan, not in a bypass.** Add:
 
@@ -236,6 +244,30 @@ and the only exits from the third were to perfect it or to set `SKIP_CODE_GATES=
 bypass leaves no trace in the plan and the next reader inherits the false claim with
 nothing marking it. Writing the section does not invalidate the audit; editing anything
 else does.
+
+**A re-audit after DEFECTS is a delta round, not a fresh one.** (This command's hook
+scripts live in `${CLAUDE_PLUGIN_ROOT}/hooks`. If that path reads as a real absolute
+path here — installed as a plugin — use it everywhere this file says
+`~/.claude/hooks`; if it still reads as the literal placeholder — running from a
+`~/.claude` checkout — use `~/.claude/hooks` as written.) Round 1 runs on
+the auditor's own `opus`. Every round after it is dispatched with the Agent tool's
+`model: sonnet` override, fed the output of `node ~/.claude/hooks/plan-audit-diff.cjs
+<path>` — the last verdict, the blocking ids, and a `git diff --no-index` from the text
+that was audited to the plan now — so it covers only the diff since the last audit, the
+named blocking ids, and any unchanged text that cites a fact the diff changed.
+`plan-audit-record.cjs` still accepts the report: it checks the reporting agent's role, not
+its model. `plan-auditor.md`'s own `## Delta audit` section carries that scope and a
+tool-call budget, so a prompt alone is not what holds it.
+
+```
+Agent(subagent_type: "plan-auditor", model: "sonnet",
+      prompt: "Audit <absolute path>. Current premises: <as above>.
+               <paste the output of `node ~/.claude/hooks/plan-audit-diff.cjs <path>`>",
+      run_in_background: false)
+```
+
+Print one status line per round, for example `Audit r2: DEFECTS — 1 blocking (D1 stale
+path), fixing` or `Audit r3: CLEAN`.
 
 **Do not re-run the auditor to make a MINOR go away.** Each round edits prose around
 correct facts and mints fresh off-by-ones — that is what 13 → 9 → 10 was. Two rounds found

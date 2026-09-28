@@ -33,10 +33,31 @@
 // project with none — which cannot serve a lookup and so is not a choice
 // worth preserving over an ungated repo.
 //
-// Set CLAUDE_NO_AUTO_REPO_SETUP=1 to disable.
+// It also keeps the shared Serena servers (bin/serena-relay.cjs, one per
+// repository, recorded in hooks/serena-registry.cjs) in step with the
+// sessions that use them. A relay that exits cleanly stops its server when it
+// was the last client, but a relay that is SIGKILLed cannot, so every session
+// start reaps the records no live client depends on. And Serena reads a
+// project's configuration once, when its server starts, so after this hook
+// writes `.serena/project.yml` it stops that repository's server: each relay
+// gets a refused connection on its next request, starts a new server that
+// reads the file, and replays its session's `initialize` to it.
+//
+// Set CLAUDE_NO_AUTO_REPO_SETUP=1 to disable writing the configuration. The
+// reaper runs regardless: it is the only thing that stops the server of a
+// relay that was killed, whether or not this hook configures repositories.
+//
+// detectServers, writeProjectYml and commandOnPath are exported for reuse
+// (see the export below, and the `require.main === module` guard further
+// down).
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+
+// Loaded defensively: a registry that fails to load must cost the session its
+// reaping and its restart, not its start.
+let registry = null;
+try { registry = require('./serena-registry.cjs'); } catch { registry = null; }
 
 // A hook on SessionStart runs before anything else can. It must never throw and
 // never exit non-zero: a failure here is a failure to start the session.
@@ -107,21 +128,27 @@ function detectServers(root) {
   return servers;
 }
 
-// Serena's supported language servers (python, typescript, ...) all launch
-// through `uvx`. Writing `.serena/project.yml` when `uvx` is not on PATH would
-// point the edit/commit gates in gate-lib.cjs at a server that can never start:
-// every edit would be denied and there would be no lookup tool available to
-// satisfy the gate. `where`/`which` is the portable way to ask "is this on
-// PATH" — Node has no built-in for it. A missing binary must be caught, not
-// thrown, and the check must not be able to hang a SessionStart.
-function uvxOnPath() {
+// Whether `cmd` resolves to something runnable: a bare name found on PATH, or
+// an absolute path that exists and is executable — `where`/`which` answers
+// both the same way. Node has no built-in for this. A missing binary must be
+// caught, not thrown, and the check must not be able to hang a SessionStart.
+function commandOnPath(cmd) {
   const finder = process.platform === 'win32' ? 'where' : 'which';
   try {
-    execFileSync(finder, ['uvx'], { stdio: 'ignore', timeout: 5000 });
+    execFileSync(finder, [cmd], { stdio: 'ignore', timeout: 5000 });
     return true;
   } catch {
     return false;
   }
+}
+
+// Serena's supported language servers (python, typescript, ...) all launch
+// through `uvx`. Writing `.serena/project.yml` when `uvx` is not on PATH would
+// point the edit/commit gates in gate-lib.cjs at a server that can never start:
+// every edit would be denied and there would be no lookup tool available to
+// satisfy the gate.
+function uvxOnPath() {
+  return commandOnPath('uvx');
 }
 
 // Whether `.serena/` at this repo root is actually excluded from `git
@@ -188,20 +215,131 @@ function newProjectYml(name, servers) {
 // Writes .serena/project.yml the way setup_repo's Serena section does:
 // replace only the language_servers: block of a file that already exists (a
 // no-op if it already reads the way `servers` wants), or create a fresh one.
+// Returns whether the file was written, which is what decides whether a
+// running server has a configuration it has not read.
 function writeProjectYml(yml, name, servers) {
   if (fs.existsSync(yml)) {
     const current = fs.readFileSync(yml, 'utf8');
     const updated = withLanguageServersBlock(current, servers);
-    if (updated !== current) fs.writeFileSync(yml, updated);
-    return;
+    if (updated === current) return false;
+    fs.writeFileSync(yml, updated);
+    return true;
   }
   fs.mkdirSync(path.dirname(yml), { recursive: true });
   fs.writeFileSync(yml, newProjectYml(name, servers));
+  return true;
 }
 
-let raw = '';
-process.stdin.on('data', (c) => { raw += c; });
-process.stdin.on('end', () => {
+// Exported for bin/serena-relay.cjs, which writes the same configuration for
+// a repository that has never had a SessionStart hook run in it — a /ship
+// worktree, chiefly, since no session ever starts there, only routes to it.
+// commandOnPath is exported too, so the relay can apply this hook's own
+// "can the server even start" precondition to whatever command it is about
+// to spawn, rather than re-implementing the where/which check. serenaDirIgnored
+// is exported so the relay can report honestly, the same way this hook's own
+// SessionStart message does, when the config it just wrote is not actually
+// hidden from `git status`.
+// Guarded below so requiring this file never runs the hook body itself.
+module.exports = {
+  detectServers, writeProjectYml, commandOnPath, serenaDirIgnored,
+};
+
+// The reaper's whole allowance per session start, and its wait for any one
+// record's lock. The hook times out at 40 s (hooks.json), and the
+// configuration work after the reaper has to fit in that too. Stopping one
+// live server can take killTree's 3 s grace, and a lock whose holder hangs
+// would make withLock wait its default 30 s. A record skipped for either
+// reason is still there at the next session start.
+const REAP_BUDGET_MS = 10000;
+const LOCK_TIMEOUT_MS = 2000;
+
+// Whether a record's server pid is running at all. A pid that is not an
+// integer above 1 names no single process, so it is treated as not running
+// and never reaches a kill.
+const serverRunning = (rec) =>
+  Number.isSafeInteger(rec.pid) && rec.pid > 1 && registry.isAlive(rec.pid);
+
+// Stops the server of every record with no live client and deletes the record.
+// Each decision is made under that key's lock, on the record re-read there,
+// so a relay that joined after listRecords is never reaped. A running server
+// is stopped only through killRecordServer, which refuses unless the live
+// process at the pid is the one recorded.
+//
+// The record is deleted once its server is stopped or dead, or when the
+// refusal is IDENTITY_MISMATCH: the live identity at the pid no longer
+// matches what was captured at spawn, most likely because the pid was
+// reused, though an identity captured at spawn can also predate an exec, so
+// this is strong but not certain evidence the recorded server is gone from
+// that pid. Any other refusal proves nothing about the process -- no
+// identity was recorded, or the live one could not be read (a failed `ps`)
+// -- and that server may be running.
+// Its record is kept, unless the pid has died meanwhile, so the next session
+// start can try again; deleting it would leave a running server with nothing
+// left that could ever stop it. A kept record is tried once per session
+// start, like every other, inside the same budget.
+//
+// deleteRecord removes only `<key>.json`: the `<key>.locks/` directory beside
+// it is what makes the lock exclusive, and wiping it could let two holders in
+// at once.
+function reapServers() {
+  if (!registry) return;
+  const deadline = Date.now() + REAP_BUDGET_MS;
+  let records;
+  try { records = registry.listRecords(); } catch { return; }
+  for (const [key, listed] of Object.entries(records)) {
+    if (Date.now() >= deadline) return;
+    try {
+      // A first pass without the lock, so a record in use costs no lock.
+      if (registry.liveClients(listed).length) continue;
+      registry.withLock(key, () => {
+        const rec = registry.read(key);
+        if (!rec || registry.liveClients(rec).length) return;
+        if (serverRunning(rec)) {
+          try {
+            registry.killRecordServer(rec);
+          } catch (e) {
+            if (e?.code !== 'IDENTITY_MISMATCH' && serverRunning(rec)) return;
+          }
+        }
+        registry.deleteRecord(key);
+      }, { timeoutMs: LOCK_TIMEOUT_MS });
+    } catch { /* this record waits for a later session start */ }
+  }
+}
+
+// Stops the shared server recorded for the repository at `root`, so that the
+// next server started reads the configuration just written. The record stays:
+// the relays respawn from it and carry its live clients over to the new
+// server. Returns 'stopped', 'none' when no recorded server is running, or
+// 'failed' when a running one could not be stopped (its lock is held, or
+// killRecordServer refused it: its pid no longer matches the record, or its
+// identity could not be confirmed).
+function restartServer(root) {
+  if (!registry) return 'failed';
+  try {
+    const { key } = registry.repoKey(root);
+    return registry.withLock(key, () => {
+      const rec = registry.read(key);
+      if (!rec || !serverRunning(rec)) return 'none';
+      registry.killRecordServer(rec);
+      return 'stopped';
+    }, { timeoutMs: LOCK_TIMEOUT_MS });
+  } catch {
+    return 'failed';
+  }
+}
+
+// Guarded so a `require('./repo-setup.cjs')` for its exports alone (see
+// above) never reads this process's stdin or reaps/writes anything: only the
+// entry script itself — `node hooks/repo-setup.cjs`, as SessionStart and this
+// file's own tests run it — has `require.main === module`.
+if (require.main === module) {
+  let raw = '';
+  process.stdin.on('data', (c) => { raw += c; });
+  process.stdin.on('end', () => {
+  // First, and outside the configuration work: every early quit() below
+  // would otherwise skip it.
+  try { reapServers(); } catch { /* never the thing that fails a session start */ }
   try {
     if (process.env.CLAUDE_NO_AUTO_REPO_SETUP === '1') quit();
 
@@ -288,7 +426,9 @@ process.stdin.on('end', () => {
       quit();
     }
 
-    try { writeProjectYml(yml, path.basename(root), servers); } catch { quit(); }
+    let wrote;
+    try { wrote = writeProjectYml(yml, path.basename(root), servers); } catch { quit(); }
+    const restart = wrote ? restartServer(root) : 'none';
     const chosen = serversIn(yml);
     if (!chosen.length) quit();
 
@@ -299,13 +439,24 @@ process.stdin.on('end', () => {
     const gitStatusLine = ignored
       ? '.serena/ is gitignored here, so this added nothing that git status reports.'
       : `.serena/ is not gitignored here, so ${path.relative(root, yml)} will show as untracked in git status unless you add .serena/ to .gitignore or your global excludes.`;
+    const serverLine = {
+      stopped: 'Serena reads a project\'s configuration once when its server starts, so this'
+        + ' repository\'s shared Serena server was stopped; this session\'s next Serena call'
+        + ' starts it again with these servers.',
+      none: 'Serena reads a project\'s configuration once when its server starts. No shared'
+        + ' Serena server was running for this repository, so the one this session starts'
+        + ' reads it.',
+      failed: 'Serena reads a project\'s configuration once when its server starts, and this'
+        + ' repository\'s shared Serena server could not be stopped to reread it, so these'
+        + ' servers apply once it next starts.',
+    }[restart];
     emit([
       `This repository had no usable Serena configuration. ${path.relative(root, yml)} was`,
       `written with language servers: ${chosen.join(', ')}.`,
-      'Serena reads a project\'s configuration once when its server starts, so these',
-      'servers are available from the next session rather than this one.',
+      serverLine,
       gitStatusLine,
     ].join(' '));
   } catch { /* never the thing that fails a session start */ }
   process.exit(0);
-});
+  });
+}

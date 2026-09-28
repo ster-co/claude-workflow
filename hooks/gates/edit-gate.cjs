@@ -5,8 +5,10 @@
 // change. That rule is advisory and gets skipped under load — measured at 4.8%
 // compliance across 4,874 edits — so this turns it into a gate: a change to a
 // source file in a Serena-configured repo is denied until a reference lookup has
-// been recorded for this turn (refs-record.cjs writes the marker;
-// discipline-reminder.cjs clears it at each user prompt).
+// been recorded for this turn in that same repository (refs-record.cjs writes
+// the marker and the repository identities it covers; discipline-reminder.cjs
+// clears both at each user prompt). A lookup in one repository does not open
+// another.
 //
 // Bash is covered as well as Edit/Write, because two thirds of tool calls in
 // this setup are Bash and file edits migrate there (`sed -i`, heredocs) under
@@ -18,23 +20,52 @@
 // Silent no-op everywhere else — repos with no Serena project config, non-source
 // files, reads, missing state. Set SKIP_CODE_GATES=1 to disable.
 const path = require('path');
-const fs = require('fs');
 const {
-  markerPath, gatesDisabled, findGatedRoot, isSourceFile, bashWriteTargets,
+  markerPath, gatesDisabled, findGatedRoot: findGatedRootUncached, isSourceFile, bashWriteTargets,
   deny, readStdin, shipPhase,
 } = require('./gate-lib.cjs');
+const { identityRecorded, repoIdentity: repoIdentityUncached } = require('./refs-record.cjs');
+
+// Both spawn a `git rev-parse`: findGatedRoot falls back to mainCheckoutRoot's
+// `--git-common-dir` once its own filesystem walk finds nothing, and
+// repoIdentity always runs its own `--show-toplevel` lookup. A Bash command
+// naming many source targets calls each once per target below (the filter
+// building `gated`, then the marker check building `unopened`), so a write
+// touching hundreds of files would otherwise spend seconds in `git`
+// subprocesses that all answer the same question for the same directory or
+// the same gated root: each spawn costs roughly a dozen milliseconds, which
+// adds up linearly with the target count with nothing memoized. One hook run
+// is one Node process handling one PreToolUse call, so a plain module-level
+// Map is scoped correctly on its own -- it never survives past this
+// invocation, so there is no cross-run cache to invalidate when a worktree
+// is added or a `.serena/project.yml` is written mid-session. Keyed on
+// exactly what each function's own answer depends on: a directory for
+// findGatedRoot's walk, a gated root for repoIdentity's.
+function memoize(fn) {
+  const cache = new Map();
+  return (arg) => {
+    if (!cache.has(arg)) cache.set(arg, fn(arg));
+    return cache.get(arg);
+  };
+}
+const findGatedRoot = memoize(findGatedRootUncached);
+const repoIdentity = memoize(repoIdentityUncached);
 
 function allow() { process.exit(0); }
 
 function reason(targets, root) {
   const names = [...new Set(targets.map((t) => path.basename(t)))].slice(0, 5).join(', ');
   return (
-    `No reference lookup has been run this turn, and ${names} lives in ${path.basename(root)}. ` +
+    `No reference lookup has been run this turn in ${path.basename(root)}, the repository ` +
+    `${names} lives in; a lookup in another repository does not count. ` +
     `Find out what depends on the symbol you are about to change — call Serena's ` +
     `"find referencing symbols" tool ({name_path: "<symbol>", relative_path: "<file>"}) — ` +
     `report what it returns, then retry. Under a plugin install the tool name is ` +
     `namespaced (mcp__plugin_<plugin-name>_serena__find_referencing_symbols, not ` +
     `mcp__serena__find_referencing_symbols); look for whichever variant is available. ` +
+    `If the file is outside the repository this session started in — a /ship worktree or ` +
+    `another repository — pass its absolute path as relative_path; serena-relay routes the ` +
+    `call to that repository's own shared Serena. ` +
     `No tool resolves a string reference (getattr, a scheduler registry, monkeypatch.setattr), ` +
     `so where one is plausible confirm with a grep as well: "no callers found" is not proof.`
   );
@@ -58,7 +89,7 @@ function phaseReason(phase, targets) {
     `${names} is a source file and nothing has been agreed yet, so editing it now is premature. ` +
     `Answer the open gate with \`/ship\` and let the run reach 'executing' before editing source. ` +
     `If this is genuinely a small fix that needs no run at all, say so and do it without starting ` +
-    `one — /plan's "do it now" triage creates no run state and this gate does not apply to it. ` +
+    `one — /blueprint's "do it now" triage creates no run state and this gate does not apply to it. ` +
     `SKIP_CODE_GATES=1 overrides this gate if neither of those fits.`
   );
 }
@@ -97,7 +128,14 @@ readStdin((input) => {
     return;
   }
 
-  if (fs.existsSync(markerPath('refs-checked', session))) return allow();
+  // Every gated target's repository must have been looked up in this turn,
+  // compared by repository IDENTITY rather than by gated root: a git
+  // worktree and its main checkout share one identity (repoIdentity), so a
+  // lookup in either opens edits in both, while findGatedRoot alone would
+  // not once the worktree has its own .serena/project.yml.
+  const marker = markerPath('refs-checked', session);
+  const unopened = gated.filter((t) => !identityRecorded(marker, cwd, repoIdentity(findGatedRoot(path.dirname(t)))));
+  if (!unopened.length) return allow();
 
-  deny(reason(gated, findGatedRoot(path.dirname(gated[0]))));
+  deny(reason(unopened, findGatedRoot(path.dirname(unopened[0]))));
 });

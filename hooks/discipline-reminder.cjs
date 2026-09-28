@@ -14,7 +14,20 @@ process.stdin.on('end', () => {
 
   const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const session = input?.session_id;
-  if (session) {
+  // session_id flows straight from hook JSON into the two filesystem paths
+  // below, with nothing else in between to sanitise it. Claude Code's own ids
+  // are UUIDs; this is deliberately looser (plain alphanumerics, `_`, `-`),
+  // but it still refuses `/` and `.`, the characters a path-traversal payload
+  // needs. Unvalidated, `session = '..'` makes the rmSync below resolve to
+  // `state/` itself (removing every session's markers, not just this one's),
+  // `'../..'` to the whole config dir, and `'../../settings'` makes the
+  // unlinkSync loop's `${session}.json` resolve to `<configDir>/settings.json`
+  // -- deleting live settings, not a per-turn marker. A session that fails
+  // this check is treated as no session at all: nothing is read or removed
+  // for it, same as the `if (session)` guard already meant for one that is
+  // simply absent.
+  const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
+  if (session && SESSION_ID_RE.test(session)) {
     // Both discipline markers are per-turn: one reference lookup and one diff
     // read cover the work done under a single user prompt.
     for (const kind of ['refs-checked', 'diff-reviewed']) {
@@ -22,6 +35,13 @@ process.stdin.on('end', () => {
         fs.unlinkSync(path.join(configDir, 'state', kind, `${session}.json`));
       } catch { /* absent is the normal case */ }
     }
+    // refs-record.cjs also writes one identity file per repository looked up
+    // this turn into a directory beside the refs-checked marker, named after
+    // the bare session id. That directory must not outlive the turn either,
+    // or a repository looked up last turn would still open edits this turn.
+    try {
+      fs.rmSync(path.join(configDir, 'state', 'refs-checked', session), { recursive: true, force: true });
+    } catch { /* absent is the normal case */ }
   }
 
   const cwd = input?.cwd || process.cwd();

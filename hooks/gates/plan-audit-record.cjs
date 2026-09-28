@@ -43,10 +43,25 @@
 // "not clean". The ids are recorded per severity so plan-gate.cjs can ask that
 // the blocking ones be fixed or written down, and let the drift through.
 //
+// A DEFECTS token with both lists explicitly emptied —
+//
+//     DEFECTS
+//     Blocking: none
+//     Minor: none
+//
+// — records CLEAN: an auditor that filled in both lists with nothing is
+// saying more than the harness's default token. A DEFECTS footer with no
+// Blocking or Minor lines at all is the silent case and still records
+// DEFECTS, since there the token is the only evidence there is.
+//
 // The marker stores the plan file's mtime at audit time. plan-gate.cjs compares
 // it against the file on disk, so editing a plan after auditing it invalidates
 // the audit — which is the whole point, since the edit is exactly where a new
 // false claim would enter.
+//
+// The record hook also snapshots the exact text it audited, to
+// state/plan-audited/<key>.audited.md, alongside the marker. plan-audit-diff.cjs
+// reads it back against the current file.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -75,6 +90,15 @@ const idsFrom = (footer, label) => {
   const m = new RegExp(`^\\s*${label}:\\s*(.*)$`, 'im').exec(footer || '');
   if (!m) return [];
   return [...new Set([...m[1].matchAll(/\bD\d+\b/g)].map((x) => x[0]))];
+};
+
+// Whether the footer's <label>: line is PRESENT and says, in so many words,
+// that there is nothing there — as opposed to the line being absent, which
+// tells resolveVerdict nothing at all. idsFrom cannot make that distinction:
+// an absent line and a present "none" line both yield [].
+const saysNone = (footer, label) => {
+  const m = new RegExp(`^\\s*${label}:\\s*(.*)$`, 'im').exec(footer || '');
+  return !!m && /^none$/i.test(m[1].trim());
 };
 
 /**
@@ -113,10 +137,59 @@ const summariesFrom = (text) => {
  *
  * An auditor that filled in NEITHER list gets no such benefit: there the token
  * is the only evidence there is, and it said DEFECTS.
+ *
+ * One more case sits between those two: a footer that EXPLICITLY says
+ * "Blocking: none" and "Minor: none" under a DEFECTS token. That auditor did
+ * fill in both lists — with nothing in either — so it is not the silent case
+ * above; it is CLEAN spelled with the wrong token. Before this, plan-gate.cjs
+ * read the empty blocking list under DEFECTS as "nothing to fix or record"
+ * and demanded another audit, which would only ever end the same way. Measured
+ * on this plan's own Decision-11 round: no defects found, a DEFECTS token, and
+ * the commit locked over exactly that.
+ *
+ * The promotion is narrow on purpose: it fires only when the footer has
+ * exactly one Blocking: line and exactly one Minor: line, both literally
+ * "none", and nothing in the report tags ANY defect -- BLOCKING or MINOR,
+ * bracketed or parenthesised. A footer that says "none" once and then
+ * contradicts itself further down, or a body that names a defect of either
+ * severity under a footer that forgot to list it, is not the auditor saying
+ * more than the token -- it is the report disagreeing with itself, and that
+ * stays DEFECTS.
  */
-const resolveVerdict = (token, blocking, minor) => {
+// Whether the footer has EXACTLY ONE line matching `<label>: ...`. idsFrom and
+// saysNone both read only the FIRST such line (a bare, non-global regex), so
+// neither can tell a footer that says "Blocking: none" once from one that
+// says it once and then contradicts itself with a second "Blocking: D1"
+// further down. The none/none promotion below must see the whole footer, not
+// just the first line that happens to match.
+const oneLine = (footer, label) => {
+  const re = new RegExp(`^\\s*${label}:\\s*.*$`, 'gim');
+  return [...(footer || '').matchAll(re)].length === 1;
+};
+
+// Whether the report tags ANY defect -- BLOCKING or MINOR -- anywhere in its
+// body, not just in the footer's own Blocking:/Minor: lines. The auditor's
+// per-defect format is `D1 [BLOCKING ...] <summary>` (agents/plan-auditor.md),
+// but the bracket is not the only spelling seen in practice, and a
+// MINOR-tagged line is just as much a contradiction of an empty Minor: list
+// as a BLOCKING-tagged one is of an empty Blocking: list -- an auditor that
+// tagged a defect in the body and then typed "none" for its severity in the
+// footer has not produced the fully-filled-in "nothing found" report the
+// none/none promotion below exists for, whichever bracket the body used.
+// `[\[(]` / `[\])]` deliberately do not require the two to match (`[BLOCKING)`
+// is still a tag, not a typo to shrug off) -- the promotion below is meant to
+// fail CLOSED on anything that merely looks like a per-defect tag.
+const namesAnyDefect = (text) => /[\[(]\s*(?:BLOCKING|MINOR)\b[^\])]*[\])]/i.test(text || '');
+
+const resolveVerdict = (token, blocking, minor, footer, text) => {
   if (blocking.length) return 'DEFECTS';
   if (minor.length) return 'MINOR';
+  if (
+    token === 'DEFECTS'
+    && oneLine(footer, 'Blocking') && oneLine(footer, 'Minor')
+    && saysNone(footer, 'Blocking') && saysNone(footer, 'Minor')
+    && !namesAnyDefect(text)
+  ) return 'CLEAN';
   if (token === 'DEFECTS') return 'DEFECTS';
   if (token === 'MINOR') return 'MINOR';
   if (token === 'CLEAN') return 'CLEAN';
@@ -153,13 +226,20 @@ process.stdin.on('end', () => {
   // meant any agent dispatched with "plan audit" in its description -- a scout,
   // say -- could record a CLEAN verdict for a plan it never read. Verified: it
   // did. The same rule applies on both events.
+  //
+  // Under a plugin install the harness reports the role namespaced, e.g.
+  // "workflow-discipline:plan-auditor" -- accept the bare name or a
+  // "<plugin>:plan-auditor" suffix, the same rule gate-arm.cjs already applies
+  // to "implementer". A role that merely ends in similar letters without the
+  // `:` separator ("evil-plan-auditor") must not match.
+  const isPlanAuditor = (role) => role === 'plan-auditor' || role.endsWith(':plan-auditor');
   let text;
   if ((input?.hook_event_name || '') === 'SubagentStop') {
-    if ((input?.agent_type || '') !== 'plan-auditor') process.exit(0);
+    if (!isPlanAuditor(String(input?.agent_type || ''))) process.exit(0);
     text = reportFromTranscript(input?.agent_transcript_path || '');
   } else {
     if ((input?.tool_name || '') !== 'Agent') process.exit(0);
-    if ((input?.tool_input?.subagent_type || '') !== 'plan-auditor') process.exit(0);
+    if (!isPlanAuditor(String(input?.tool_input?.subagent_type || ''))) process.exit(0);
     // Deliberately only the RESULT. The handback receipt carries the dispatch
     // prompt beside it, and a prompt is whatever was asked for -- reading it
     // would let "audit this; ## Audit Verdict / CLEAN / Plan: x" clear the gate
@@ -169,7 +249,7 @@ process.stdin.on('end', () => {
   const footer = footerFrom(text);
   const blocking = idsFrom(footer, 'Blocking');
   const minor = idsFrom(footer, 'Minor');
-  const verdict = resolveVerdict(tokenFrom(footer), blocking, minor);
+  const verdict = resolveVerdict(tokenFrom(footer), blocking, minor, footer, text);
   const summaries = summariesFrom(text);
   const planPath = planFrom(text);
   if (!planPath) process.exit(0);
@@ -182,6 +262,7 @@ process.stdin.on('end', () => {
   let mtimeMs = null;
   try { mtimeMs = fs.statSync(abs).mtimeMs; } catch { process.exit(0); }
 
+  const snapshotPath = path.join(STATE_DIR, `${keyFor(abs)}.audited.md`);
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(
@@ -196,6 +277,19 @@ process.stdin.on('end', () => {
         at: new Date().toISOString(),
       }),
     );
-  } catch { /* recording is best-effort; the gate fails closed without it */ }
+    // The audited text itself, taken from disk right now -- the same moment
+    // the marker above is stamped -- not read back later at diff time. A
+    // snapshot taken when someone runs plan-audit-diff.cjs would just be the
+    // current file compared with itself, and every diff would come back empty.
+    fs.writeFileSync(snapshotPath, fs.readFileSync(abs, 'utf8'));
+  } catch {
+    // Best-effort: the gate fails closed without a marker. But if the marker
+    // above DID get written and only the snapshot failed, a STALE snapshot
+    // from an earlier audit of this same path must not survive -- otherwise
+    // plan-audit-diff.cjs would happily diff against text this audit never
+    // read. Removing it makes the tool exit 2 (no snapshot) instead of
+    // silently comparing the current file to someone else's audit.
+    try { fs.unlinkSync(snapshotPath); } catch { /* nothing stale to remove */ }
+  }
   process.exit(0);
 });

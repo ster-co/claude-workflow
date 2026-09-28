@@ -16,31 +16,10 @@ const path = require('path');
 const fs = require('fs');
 const {
   markerPath, gatesDisabled, findGatedRoot, executableShell, deny, readStdin,
+  gitSubcommandIs, gitRunDirs,
 } = require('./gate-lib.cjs');
 
 function allow() { process.exit(0); }
-
-// `git commit` as a command actually being run — not the words inside a commit
-// message, a heredoc being written to a document, or an echoed reminder.
-//
-// Git's global flags sit between `git` and the subcommand, and several take a separate
-// value token (`-c user.name=x`, `-C dir`, `--git-dir path`). Consuming the flag but not
-// its value left `git -c user.name=x commit` unmatched, which bypassed the gate outright.
-const VALUE_FLAGS = /^(-c|-C|--git-dir|--work-tree|--namespace|--exec-path|--config-env)$/;
-
-function gitSubcommandIs(shell, name) {
-  const tokens = shell.split(/\s+/);
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] !== 'git') continue;
-    let j = i + 1;
-    while (j < tokens.length && tokens[j].startsWith('-')) {
-      const eq = tokens[j].includes('=');
-      j += (VALUE_FLAGS.test(tokens[j]) && !eq) ? 2 : 1;
-    }
-    if (tokens[j] === name) return true;
-  }
-  return false;
-}
 
 readStdin((input) => {
   if (gatesDisabled()) return allow();
@@ -50,13 +29,26 @@ readStdin((input) => {
   if (tool !== 'Bash' && tool !== 'PowerShell') return allow();
 
   const command = input?.tool_input?.command || '';
-  if (!gitSubcommandIs(executableShell(command), 'commit')) return allow();
+  const shell = executableShell(command);
+  if (!gitSubcommandIs(shell, 'commit')) return allow();
 
   const session = input?.session_id;
   if (!session) return allow();
   if (fs.existsSync(markerPath('diff-reviewed', session))) return allow();
 
-  const root = findGatedRoot(input?.cwd || process.cwd());
+  // The repo that matters is the one the `git commit` actually runs in, not
+  // the session's own directory — a `cd`/`-C` in the same command changes it.
+  // When that can't be pinned down to one directory, every candidate is
+  // checked and the commit is denied if any of them is gated (Decision 9).
+  // gitRunDirs gets the RAW command, not `shell` (executableShell's
+  // quote-blanked text) — it needs to see whether a `cd`/`-C` argument was
+  // quoted in the original, which the blanking pass has already erased.
+  const dirs = gitRunDirs(command, input?.cwd || process.cwd());
+  let root = null;
+  for (const dir of dirs) {
+    root = findGatedRoot(dir);
+    if (root) break;
+  }
   if (!root) return allow();
 
   deny(

@@ -21,7 +21,7 @@ Blast-radius discipline lives in the repo's own instructions, not here.
 ## When this does not apply
 
 - **The behaviour changes, even slightly.** Then it is a feature or a fix, and it goes
-  through `/plan` or `/bug`. "Refactor and also fix that bug while I'm in there" is how a
+  through `/blueprint` or `/diagnose`. "Refactor and also fix that bug while I'm in there" is how a
   behaviour change ships inside a diff nobody reviewed for behaviour.
 - **Legacy modernization, cross-stack rewrites, framework version uplifts.** The first-party
   `code-modernization` plugin owns that — `uplift-migrator`, `version-delta-analyst`, and a
@@ -92,4 +92,4 @@ Two questions worth answering explicitly before declaring it done:
 - **If the refactor reveals a bug**, note it and finish the refactor first. A fix inside a
   structural diff is invisible to review and cannot be reverted separately.
 - **If the change stops being mechanical** — you are deciding what the code *should* do
-  rather than how it should be shaped — stop. That is a design change and it needs `/plan`.
+  rather than how it should be shaped — stop. That is a design change and it needs `/blueprint`.

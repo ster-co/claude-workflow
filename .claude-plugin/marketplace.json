@@ -12,7 +12,8 @@
     {
       "name": "workflow-discipline",
       "source": "./",
-      "description": "Plan-gated workflow with an orchestrator loop (/ship, /plan, /execute, /land), enforcement hooks for edits, commits and verification, and Serena code intelligence."
+      "version": "0.7.1",
+      "description": "Plan-gated workflow with an orchestrator loop (/ship, /blueprint, /execute, /land), enforcement hooks for edits, commits and verification, and Serena code intelligence."
     }
   ]
 }
