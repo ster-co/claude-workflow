@@ -620,8 +620,12 @@ function runHardeningTests() {
       const deadline = Date.now() + timeoutMs;
       const poll = () => {
         try {
-          const r = spawnSync('ps', ['-o', 'pid=', '-p', String(pid)], { encoding: 'utf8' });
-          if (r.status === 0 && r.stdout.trim()) return res();
+          // No `ps` on Windows; tasklist prints a row for a live pid and an
+          // "INFO: No tasks" line otherwise, always with exit status 0.
+          const r = process.platform === 'win32'
+            ? spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' })
+            : spawnSync('ps', ['-o', 'pid=', '-p', String(pid)], { encoding: 'utf8' });
+          if (r.status === 0 && r.stdout.trim() && !/^INFO:/.test(r.stdout.trim())) return res();
         } catch { /* retry */ }
         if (Date.now() > deadline) return rej(new Error(`pid ${pid} never appeared in ps`));
         setTimeout(poll, 20);
@@ -653,6 +657,27 @@ function runHardeningTests() {
       // spawn time matches, and killRecordServer is allowed to proceed.
       const identity = captureIdentity(helper.pid);
       ok('captureIdentity returns a non-empty identity for a live pid', typeof identity === 'string' && identity.length > 0);
+      if (process.platform === 'win32') {
+        // The relay captures at spawn and the reaper re-reads at kill time;
+        // an identity that is not the UTC creation time plus the command line
+        // in one fixed format would make them disagree.
+        ok('the identity is the UTC creation time (round-trip format), a space, then the command line',
+          /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}Z /.test(identity) && identity.includes('setInterval'));
+        // What PowerShell reports for the same process, computed here without
+        // the product: the fast path must name the process the same way.
+        const viaCim = spawnSync('powershell', ['-NoProfile', '-Command',
+          `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${helper.pid}"; `
+          + "$p.CreationDate.ToUniversalTime().ToString('o') + ' ' + $p.CommandLine"], { encoding: 'utf8' }).stdout.trim();
+        check('the identity equals the PowerShell CIM identity of the same process', identity, viaCim);
+        // Identity is captured on every session's server-start path, so its
+        // cost is every session's Serena cold start. PowerShell took 1.4-1.7 s
+        // per call on the Windows 11 ARM64 test VM; the cscript path 0.1-0.3 s.
+        const t0 = Date.now();
+        for (let i = 0; i < 3; i++) captureIdentity(helper.pid);
+        const avgMs = (Date.now() - t0) / 3;
+        console.log(`  (captureIdentity averaged ${Math.round(avgMs)} ms over 3 calls)`);
+        ok('captureIdentity averages under 1000 ms per call', avgMs < 1000);
+      }
       const matched = { root: '/tmp/x', pid: helper.pid, port: 1, startedAt: 0, clients: [], identity };
       killRecordServer(matched);
       ok('killRecordServer kills when the live process matches the recorded identity', !isAlive(helper.pid));
@@ -1026,7 +1051,9 @@ function runBrief5FollowupTests() {
 // lstart=,command=`, or PowerShell on win32) with the spawnSync result it
 // returns. Every other spawnSync -- the process table killTree walks,
 // taskkill -- stays forbidden, and so does process.kill.
-function loadRegistryInVm(platform, { identityLookup } = {}) {
+// `spawnImpl` and `fsStub`, when given, replace the forbidding spawnSync and the
+// empty fs, for a check that must drive a code path those two would block.
+function loadRegistryInVm(platform, { identityLookup, spawnImpl, fsStub } = {}) {
   const source = fs.readFileSync(path.join(HOOKS, 'serena-registry.cjs'), 'utf8');
   const vm = require('vm');
   const calls = [];
@@ -1036,7 +1063,9 @@ function loadRegistryInVm(platform, { identityLookup } = {}) {
   };
   const isIdentityLookup = (cmd, args) => cmd === 'powershell'
     || (cmd === 'ps' && Array.isArray(args) && args.includes('lstart=,command='));
-  const spawnSync = identityLookup
+  const spawnSync = spawnImpl
+    ? (cmd, args, ...rest) => { calls.push(['spawnSync', cmd, args]); return spawnImpl(cmd, args, ...rest); }
+    : identityLookup
     ? (cmd, args, ...rest) => {
       if (!isIdentityLookup(cmd, args)) return forbidden('spawnSync')(cmd, args, ...rest);
       calls.push(['identity lookup', cmd]);
@@ -1046,8 +1075,9 @@ function loadRegistryInVm(platform, { identityLookup } = {}) {
   const module = { exports: {} };
   const dependencies = {
     child_process: { spawnSync },
-    crypto: {}, fs: {}, os: {}, path,
+    crypto: {}, fs: fsStub || {}, os: {}, path,
     './gates/gate-lib.cjs': { STATE_DIR: '/mock-state' },
+    './run-state.cjs': { replaceFile: forbidden('replaceFile') },
   };
   const context = vm.createContext({
     module,
@@ -1062,10 +1092,11 @@ function loadRegistryInVm(platform, { identityLookup } = {}) {
     calls.length = 0;
     context.callArg = arg;
     let error = null;
+    let result;
     try {
-      vm.runInContext(`module.exports.${fnName}(callArg)`, context, { timeout: 1000 });
+      result = vm.runInContext(`module.exports.${fnName}(callArg)`, context, { timeout: 1000 });
     } catch (e) { error = e; }
-    return { error, calls: calls.slice() };
+    return { error, calls: calls.slice(), result };
   };
   return { call };
 }
@@ -1394,6 +1425,42 @@ async function runBrief7Tests() {
     const command = calls[0] ? [calls[0][1], ...calls[0][2]].join(' ') : '';
     ok(`the command formats CreationDate as round-trip UTC (got: ${command})`, /CreationDate\.ToUniversalTime\(\)\.ToString\('o'\)/.test(command));
     ok('the command does not render the DateTime through Format-List', !/Format-List/.test(command));
+  }
+
+  console.log('\nserena-registry.cjs — win32 captureIdentity accepts cscript output only in the identity format (vm stub)');
+  {
+    // cscript can exit 0 and print a message instead of an identity (Windows
+    // Script Host disabled by policy prints one). Taken as the identity, that
+    // one string would stand for EVERY process, so a record would match a
+    // reused pid and killRecordServer would kill whatever holds it now.
+    // Anything that is not `<UTC round-trip time> <command line>` must fall
+    // back to the PowerShell lookup instead.
+    const written = {};
+    const fsStub = {
+      mkdirSync() {},
+      readFileSync(p) { if (p in written) return written[p]; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); },
+      writeFileSync(p, d) { written[p] = String(d); },
+      renameSync(a, b) { written[b] = written[a]; delete written[a]; },
+    };
+    const PS_IDENTITY = '2026-09-30T12:00:00.1234560Z C:\\uv.exe tool run';
+    const cases = [
+      ['cscript printed a policy message', { status: 0, stdout: 'Windows Script Host access is disabled on this machine.\r\n' }, PS_IDENTITY],
+      ['cscript printed a real identity', { status: 0, stdout: '2026-09-30T12:00:00.1234560Z C:\\uv.exe tool run\r\n' }, '2026-09-30T12:00:00.1234560Z C:\\uv.exe tool run'],
+      ['cscript found no such process (empty output)', { status: 0, stdout: '' }, ''],
+    ];
+    for (const [what, cscriptResult, want] of cases) {
+      const { call } = loadRegistryInVm('win32', {
+        fsStub,
+        spawnImpl: (cmd) => (cmd === 'cscript' ? cscriptResult : { status: 0, stdout: `${PS_IDENTITY}\r\n` }),
+      });
+      const { error, calls, result } = call('captureIdentity', 12345);
+      const spawned = calls.filter((c) => c[0] === 'spawnSync').map((c) => c[1]);
+      check(`${what}: no error`, error && error.message, null);
+      check(`${what}: cscript was tried first`, spawned[0], 'cscript');
+      check(`${what}: identity`, result, want);
+      check(`${what}: PowerShell consulted only when cscript's output was not an identity`,
+        spawned.includes('powershell'), what.includes('policy'));
+    }
   }
 
   console.log('\nserena-registry.cjs — the unreleased retry never releases another process\'s generation');

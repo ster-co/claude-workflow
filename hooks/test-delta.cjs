@@ -261,6 +261,33 @@ const readerFor = (command) => (PYTEST_COMMAND_RE.test(command) ? 'pytest' : 'co
 const HAS_SHELL_OPERATORS = /[|;&#<>]|\n/;
 
 /**
+ * Quote one pytest node id as a single literal argument for the shell that
+ * `runCommandOnce` hands the command to: `sh -c` on POSIX, `cmd.exe /d /s /c`
+ * on Windows. Returns null when the id cannot be made literal for that shell.
+ *
+ * POSIX: single quotes suppress every expansion (`$5` and backtick inside
+ * double quotes are still expanded, so `JSON.stringify` would be wrong); the
+ * only thing left to escape is an embedded single quote, closed-escaped-
+ * reopened per the usual sh idiom.
+ *
+ * Windows: cmd.exe does not treat `'` as a quote, so a POSIX-quoted id reaches
+ * pytest with the quote characters attached and matches nothing -- a flaky
+ * test then re-runs to "no tests ran" and is reported NEWLY FAILING. Inside
+ * double quotes cmd leaves `& | < > ^ ( )` alone and the C runtime that parses
+ * the program's argv strips the quotes. What double quotes cannot protect: an
+ * embedded `"` (it toggles cmd's quote state), `%` (variable expansion happens
+ * before quoting is considered) and a line break (ends the command). Those
+ * return null. Backslashes before the closing quote are doubled so they cannot
+ * escape it.
+ */
+function quoteNodeId(id, platform = process.platform) {
+  const s = String(id);
+  if (platform !== 'win32') return `'${s.replace(/'/g, `'\\''`)}'`;
+  if (/["%\r\n]/.test(s)) return null;
+  return `"${s.replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/**
  * `--command`'s baseline, retry and verdict, per Decision 8: one run, judged
  * by exit code and a baseline kept per (root, branch, command); a NEWLY
  * FAILING result is re-run once before it is blamed on this change, because
@@ -356,16 +383,14 @@ function runCommandFlow(command, cwd, { explicitBaseline = false } = {}) {
   // shell operators also re-runs whole: there is no safe place to splice an
   // extra argument into a pipeline or redirection without changing what it
   // does (see HAS_SHELL_OPERATORS above).
-  const pytestSubset = reader === 'pytest' && d.newly.length > 0 && !HAS_SHELL_OPERATORS.test(command);
-  // A node id is quoted for the SHELL this re-run goes through (`sh -c`), not
-  // for JS: `JSON.stringify` makes a double-quoted string, and a shell still
-  // expands `$` and backtick inside double quotes -- `test_p[$5]` reads a
-  // positional parameter, `` test_p[`x`] `` runs `x` as a command. Single
-  // quotes suppress all of that; the only thing that still needs escaping is
-  // an embedded single quote, closed-escaped-reopened per the usual sh idiom.
-  const shellQuote = (id) => `'${String(id).replace(/'/g, `'\\''`)}'`;
+  const pytestSubsetWanted = reader === 'pytest' && d.newly.length > 0 && !HAS_SHELL_OPERATORS.test(command);
+  // Ids are quoted for the shell of this platform (see quoteNodeId). One that
+  // cannot be made literal for cmd.exe sends the whole command back instead of
+  // a subset: narrower is only an optimisation, wrong quoting is not.
+  const quotedIds = d.newly.map((id) => quoteNodeId(id));
+  const pytestSubset = pytestSubsetWanted && quotedIds.every((q) => q !== null);
   const rerunCommand = pytestSubset
-    ? `${command} ${d.newly.map(shellQuote).join(' ')}`
+    ? `${command} ${quotedIds.join(' ')}`
     : command;
   const second = runCommandOnce(rerunCommand, info.root);
   const failing2 = commandFailuresFrom(reader, second.output);
@@ -519,6 +544,6 @@ function main() {
 
 module.exports = {
   detectRunner, failuresFrom, commandFailuresFrom, compare, baselinePath,
-  readerFor, runCommandOnce, HAS_SHELL_OPERATORS,
+  readerFor, runCommandOnce, quoteNodeId, HAS_SHELL_OPERATORS,
 };
 if (require.main === module) main();

@@ -28,7 +28,7 @@ PUSH=0
 # What a colleague needs. Everything else stays in the playground.
 INCLUDE=(
   .claude-plugin commands agents skills hooks output-styles bin
-  .mcp.json settings.json CLAUDE.md README.md SETUP.md .gitignore
+  .mcp.json settings.json CLAUDE.md README.md SETUP.md .gitignore .gitattributes
 )
 
 say() { printf '%s\n' "$*"; }

@@ -27,7 +27,7 @@ Everything else is a step `/ship` already does for you.
 | you have | type | what happens |
 |---|---|---|
 | a vague itch | `/brainstorm <thing>` | 2–3 approaches with trade-offs, a recommendation, **stops**. Never writes a plan. Type `/blueprint` when you know what you want. |
-| a small, obvious ask | `/quick <ask>` | answer, brainstorm, bug fix or change, inline, no plan, no subagents except `scout`. **Do-it-now threshold** (estimated before editing): ≤3 files, ~30 lines, no design call, a cause that reproduces, no shared resource outside this checkout. Crossing it — even mid-change — escalates to `/diagnose` or `/ship`; edits already made stay uncommitted and get reported. |
+| a small, obvious ask | `/quick <ask>` | answer, brainstorm, bug fix or change, inline, no plan, no subagents except `scout`. **Do-it-now threshold** (estimated before editing): ≤5 files, ~80 lines of behaviour-bearing code (tests and docs don't count), no gate/permission/auth change at any size, no design call, a cause that reproduces, no shared resource outside this checkout. Crossing it — even mid-change — escalates to `/diagnose` or `/ship`; edits already made stay uncommitted and get reported. |
 | a clear feature | `/ship <idea>` | the whole pipeline; stops twice for you |
 | a written plan already | `/ship path/to/blueprint.md` | skips planning, stops at the approval gate |
 | a bug | `/diagnose <symptom>` | refuses to diagnose until environment, one-symptom and expected-vs-observed are settled; a simple fix goes straight through, anything needing a decision is handed to `/ship` — answer with `/ship <n>` in the same chat |
@@ -120,6 +120,7 @@ Not to be confused with the bundled `code-review` skill: that hunts correctness 
 | `/execute [range]` | per brief: implementer → reviewer → commit → next |
 | `/land` | verify, read the diff, **offer `/attack`**, commit, push, open PR |
 | `/handoff` | write the next session's opening prompt, deliberately |
+| `/subagent-mode fast\|quality` | dispatch the `-lite` reviewer/debugger/auditors (fast) or the full ones (quality, default) |
 
 `/blueprint` triages into three tracks and you do not override it: **do it now** (small and
 obvious), **iterate in a browser** (visual/taste work — a plan is the wrong artifact), or
@@ -141,6 +142,7 @@ that invalidates the prompt cache. Send the work down instead.
 | `debugger` | opus | root cause after two failed review rounds |
 | `plan-auditor` | opus | verifies a plan's claims against the repo |
 | `root-cause-auditor` | opus | attacks a diagnosis before code is written against it |
+| `…-lite` | opus, effort medium | the four roles above under `/subagent-mode fast`: same prompt, less reasoning |
 
 ---
 

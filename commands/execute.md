@@ -149,7 +149,11 @@ specific, and skipping any of them reproduces a known failure:
      anywhere in the description, the prompt or the report — which is how a prompt that
      mentions brief 3 for context before reviewing brief 4 credits the wrong one. Tell it the snapshot sha
      so it can restore if it breaks something,
-     and tell it not to run `git checkout`, `git reset` or `git stash`. Read the diff with
+     and tell it not to run `git checkout`, `git reset`, or `git stash` bare or with
+     `pop`/`apply`/`drop` — all of those move or discard working-tree content. `git stash
+     create` is the one exception: it writes a commit object and touches neither the working
+     tree nor the index, which is exactly why the tree-hash step above uses it instead of a
+     destructive stash. Read the diff with
      `git diff HEAD` or `git show <snap>`. Do NOT record the round here — `verify-record.cjs`
      counts it from the verdict, and counting the dispatch made the debugger threshold trip
      after one rejection. Brief it to *disprove*: "Your
@@ -202,10 +206,13 @@ specific, and skipping any of them reproduces a known failure:
        full extra implementer and reviewer round. Take a fresh snapshot before the next
        dispatch, as always — the appended brief is authored work living in the tree, and
        the snapshot is what makes it recoverable.
-   - **After two REJECTED verdicts on the same brief** (`inFlight["<n>"].reviewRounds >= 2`
-     for this brief in `run-state.cjs get`'s output, which is why the counter lives on disk —
-     and is incremented by `verify-record.cjs` when it parses a REJECTED verdict, so it now
-     counts what this line says it counts). The top-level `reviewRounds` field only mirrors
+   - **After two failed review rounds on the same brief** — a REJECTED verdict, a sabotage
+     that stayed green, or a behavioural review missing `## SABOTAGE` (the sabotage step
+     below) — read `inFlight["<n>"].reviewRounds >= 2` for this brief in
+     `run-state.cjs get`'s output rather than counting verdicts yourself. The counter lives
+     on disk; `verify-record.cjs` increments it when it parses a REJECTED verdict, and the
+     sabotage step increments it with `run-state.cjs review-round <n>` for the other two
+     cases. The top-level `reviewRounds` field only mirrors
      whichever brief is `currentBrief`, so when a parallel group has more than one brief in
      flight, read the per-brief entry under `inFlight`, not the top-level field — a group
      member that is not the current brief would otherwise never escalate to the debugger.
@@ -229,7 +236,75 @@ specific, and skipping any of them reproduces a known failure:
      implementer/reviewer pair with no exit condition ping-pongs indefinitely. Print one
      status line per round, implementer, reviewer or debugger — for example
      `BRIEF 3 review: APPROVED` or `BRIEF 3 debugger: round 2`.
-   - Run one suite pass, judged by exit code:
+   - **Perform the reviewer's named sabotages** — behavioural briefs only, once the brief is
+     APPROVED, before the suite pass below. The implementer proved each new test red→green;
+     this is the step that proves the finished code is what keeps it green. The reviewer
+     names them under `## SABOTAGE` and you perform them, because it cannot: it has no Edit
+     tool, the edit gate refuses its Bash edits without a lookup it has no tool for, and
+     reviewers in a parallel group share one worktree, so one reviewer's broken file would
+     turn a sibling's concurrent suite run red. For each named sabotage, one at a time
+     (inside a group, serially, after every member is APPROVED): `b=$(mktemp)`, `cp <file>
+     "$b"`, apply the named edit, run only the named test, and confirm it goes red for the
+     named reason; then restore with `cp "$b" <file>` — never with `git checkout -- <file>`,
+     which would also discard the uncommitted work under review — and confirm
+     `cmp "$b" <file>`. A byte-identical restore leaves the tree hash the reviewer recorded
+     valid for the solo-brief reuse below. A test that stays green is a must-fix inside the
+     brief's own files: a fresh implementer round with that finding, as above. A behavioural
+     review with new tests and no `## SABOTAGE` section is incomplete: dispatch the reviewer
+     again. **Either outcome is a failed review round — record it with
+     `node ~/.claude/hooks/run-state.cjs review-round <n>`.** `verify-record.cjs` counts only
+     a parsed REJECTED, and the gate already holds this brief's APPROVED, so without this a
+     sabotage that never reaches the test's assertion loops implementer → reviewer →
+     sabotage forever and the two-round debugger threshold never fires. Print
+     `BRIEF <n> sabotage: <k>/<k> red`.
+   - Run one suite pass, judged by exit code. **For a solo (non-group) brief only:** if the
+     just-APPROVED round's reviewer report already carries that exact `test-delta.cjs
+     --command` invocation, **its `on <repo>@<branch>` label matches this brief's own
+     worktree directory name and current branch** — the command string alone is not enough,
+     since the reviewer could have run it from a different checkout (its default cwd) whose
+     label would not match — and **the recorded test-delta.cjs exit code is 0 and its
+     verdict line is one of the passing forms** ("nothing newly failing", "FLAKY (...) ...
+     not blocking", or "no baseline existed, so this run is the baseline"), and the
+     orchestrator's own freshly computed tree hash EXACTLY MATCHES the tree hash the
+     reviewer recorded in its `TESTS` line, skip the orchestrator's own rerun and cite the
+     reviewer's recorded result instead — name the reviewer's `TESTS` line rather than
+     running it again. Compute that tree hash the same way the reviewer did: `git add -A
+     && git stash create` — the same first two commands this file's own "Snapshot the tree
+     before dispatching" step above uses — then `git rev-parse <that-sha>^{tree}`, or
+     `git rev-parse HEAD^{tree}` if `git stash create` prints nothing (an already-clean
+     tree). **Compare the `^{tree}` hash, never the stash/HEAD commit sha itself**:
+     `git stash create` bakes an author/committer timestamp into the commit object it
+     writes, so invoking it twice against a byte-identical tree returns two different
+     commit shas even though both point at the same tree — a check keyed on the commit sha
+     would never match the reviewer's own earlier run, defeating the skip entirely, safely
+     but silently (it would just always rerun). Do this immediately before deciding whether
+     to skip — not earlier in the round, since anything can have touched the tree since. A
+     `git status --short` comparison cannot do this job either: it compares status LETTERS
+     (e.g. `M reviewer.md`), and a file the reviewer's review process touches, or that the
+     sabotage step imperfectly restores, after a green test-delta run was recorded still reads `M
+     reviewer.md` both before and after — identical output, tripwire silent — even though
+     its content changed out from under the recorded result. Only a content-addressed tree
+     hash (the same `git stash create` plus `^{tree}` mechanism above, which identifies the
+     exact working-tree content, staged and unstaged, without touching the tree, and does so
+     deterministically regardless of when it is computed) can tell two different contents of
+     an already-modified file apart, which is the whole point of trusting the reviewer's
+     recorded run instead of re-running it. The exit code and verdict
+     line that matter here are
+     `test-delta.cjs`'s OWN process exit code and its own final `test-delta:` verdict line —
+     never the test command's echoed `` `cmd` exit N on <label> `` line `test-delta.cjs`
+     prints mid-run for the raw command it ran, which is a different number and can disagree
+     with `test-delta.cjs`'s own verdict in either direction: a red baseline or a
+     non-repeating flake echoes exit 1 there while `test-delta.cjs` itself exits 0 (safe, but
+     wrongly read as a reason not to skip if keyed on that line instead), and a piped test
+     command can echo exit 0 there while `test-delta.cjs` itself blocks with exit 1 (unsafe
+     to skip on). Otherwise (no matching recorded run, the label names a different repo or
+     branch, the recorded exit code is non-zero, the verdict line is anything else — a
+     "NEWLY FAILING" line, or nothing recorded at all — or the freshly computed tree hash
+     does not exactly match the reviewer's recorded one — this is how "the tree changed after
+     review" gets checked now, not assumed) run it as below. A
+     parallel group always keeps its own single
+     combined pass after the whole group (below), unchanged — this skip applies only to a
+     solo brief's own rerun, never to the group pass:
      `node ~/.claude/hooks/test-delta.cjs --command "<house-rules Tests command>"` — the
      exact string from the brief file's house rules, unmodified. Paste what it says.
      Compare against the baseline, not against zero failures — and let the tool do the
@@ -299,7 +374,8 @@ specific, and skipping any of them reproduces a known failure:
 Everything else is a bug, and a run that ends for an unlisted reason should say so.
 
 1. Every brief is `done` or `blocked` → land.
-2. Two `REJECTED` verdicts on one brief → debugger.
+2. Two failed review rounds on one brief (REJECTED, a green sabotage, or a missing
+   `## SABOTAGE`; `inFlight["<n>"].reviewRounds >= 2`) → debugger.
 3. Two debug rounds without resolution → `run-state.cjs block <n> --reason <why>`, and
    **stop the run**. Briefs are sequential between groups, and a brief that does not qualify
    for the current parallel group is sequential too, so a blocked one halts rather than being

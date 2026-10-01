@@ -4,16 +4,16 @@ Installs the `workflow-discipline` plugin and its supporting pieces on a new mac
 Takes about fifteen minutes. Do the steps in order: each ends with a **Check**, and a
 failed check means the step it belongs to is not done — fix that before moving on.
 
-Windows (PowerShell) and macOS/Linux commands are both given wherever they differ.
-Windows commands have not yet been run on a real Windows machine — see
+Windows (PowerShell) and macOS/Linux commands are both given wherever they differ. Both have
+been run end to end, the Windows ones on a Windows 11 virtual machine — see
 [What has and has not been verified](#what-has-and-has-not-been-verified).
 
 **Checklist**
 
-1. [Install the four tools](#step-1--install-the-four-tools): `node`, `git`, `gh`, `uv`
+1. [Install the four tools](#step-1--install-the-four-tools): `node`, `git`, `gh`, `uv` — and Claude Code itself
 2. [Give git access to GitHub](#step-2--give-git-access-to-github) (HTTPS via `gh`, or SSH)
 3. [Install the plugin](#step-3--install-the-plugin)
-4. [Copy `CLAUDE.md`, merge the settings, ignore `.serena/`](#step-4--copy-claudemd-merge-the-settings-ignore-serena)
+4. [Copy `CLAUDE.md`, merge the settings, ignore `.serena/`, raise the MCP timeout](#step-4--copy-claudemd-merge-the-settings-ignore-serena-raise-the-mcp-timeout)
 5. [Restart Claude Code / reload VS Code](#step-5--restart-claude-code--reload-vs-code)
 6. [Open a git repository](#step-6--open-a-git-repository)
 7. [Prove the gates fire](#step-7--prove-the-gates-fire)
@@ -27,7 +27,7 @@ Windows commands have not yet been run on a real Windows machine — see
 | `node` | every hook is a `.cjs` script run with `node` |
 | `git` | the setup hook and the gates find a repository with `git rev-parse --show-toplevel`; `/land` diffs and pushes |
 | `uv` (provides `uvx`) | starts Serena, the code-intelligence server the edit gate depends on |
-| `gh` | **optional.** Nothing in the workflow calls it — `git grep gh` across `commands/`, `agents/`, `hooks/` and `skills/` returns nothing. `commands/land.md:74` says only "Open a PR" and names no tool. It is a convenience for two things: logging in to GitHub in step 2 (Git Credential Manager does the same on Windows) and opening the pull request at the end of `/land` instead of clicking the compare link git prints on push |
+| `gh` | **optional.** One hook uses it: the session-start worktree sweep asks `gh` which pull requests merged, and without `gh` (or its login) it removes nothing — the safe direction. `commands/land.md` says only "Open a PR" and names no tool. Otherwise it is a convenience for two things: logging in to GitHub in step 2 (Git Credential Manager does the same on Windows) and opening the pull request at the end of `/land` instead of clicking the compare link git prints on push |
 
 Check what you already have — install only what is missing:
 
@@ -40,9 +40,9 @@ uvx --version
 
 ```
 # Windows (winget ships with Windows 10/11)
-winget install OpenJS.NodeJS
-winget install Git.Git
-winget install GitHub.cli
+winget install OpenJS.NodeJS --source winget --accept-source-agreements --accept-package-agreements
+winget install Git.Git --source winget --accept-package-agreements
+winget install GitHub.cli --source winget --accept-package-agreements
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # macOS (Homebrew)
@@ -55,13 +55,30 @@ sudo apt install -y nodejs git
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+On Windows the `--accept-…` flags answer the licence prompts winget otherwise stops at the
+first time it runs (the Microsoft Store source's terms among them); `--source winget` keeps
+it from asking about the Store at all.
+
+**Claude Code itself**, if you do not have it yet (the official installer; see
+<https://code.claude.com/docs/en/setup>):
+
+```
+# macOS/Linux
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Windows (PowerShell)
+irm https://claude.ai/install.ps1 | iex
+```
+
+Log in the first time you run `claude`: it opens a browser.
+
 **Then close every terminal and open a new one** — and if you use VS Code, quit it fully
 and reopen it (VS Code's integrated terminal and the Claude Code extension inherit `PATH`
 from when VS Code started). An installer that edits `PATH` does not change processes that
 were already running, and a `uvx` that is installed but not on `PATH` fails exactly like
 one that is not installed.
 
-**Check:** all four `--version` commands print a version, not an error, in a *new* terminal.
+**Check:** all four `--version` commands, and `claude --version`, print a version, not an error, in a *new* terminal.
 
 **Do not skip `uv`.** Without `uvx`, the setup hook refuses to configure any repository
 (it would point the gates at a server that cannot start), so nothing is ever gated. It
@@ -82,9 +99,9 @@ able to authenticate to GitHub. Pick **one** of the two routes.
 ### Route A — HTTPS (simplest, recommended)
 
 **On Windows, try nothing first.** Git for Windows bundles Git Credential Manager, which
-opens a browser login the first time git needs credentials. So just run step 2's
-`claude plugin marketplace add` and let it prompt you. If it succeeds, you are done — skip
-to step 3.
+opens a browser login the first time git needs credentials. So you can skip straight to
+step 3's HTTPS `/plugin marketplace add` and let it prompt you. If that succeeds, you are
+done.
 
 If it does not prompt, or fails, authenticate explicitly with `gh`:
 
@@ -178,7 +195,7 @@ The first prints `Hi <your-username>! You've successfully authenticated...` (it 
 non-zero — that is normal for this command). The second prints one line with a commit
 hash.
 
-With SSH, install the marketplace in step 3 using the SSH URL rather than the shorthand.
+With SSH, install the marketplace in step 3 using the SSH URL.
 
 ---
 
@@ -188,19 +205,35 @@ Run these inside Claude Code — in the terminal (`claude`) or in the VS Code ex
 chat box:
 
 ```
-/plugin marketplace add ster-co/claude-workflow
+/plugin marketplace add https://github.com/anthropics/claude-plugins-official.git
+/plugin marketplace add https://github.com/ster-co/claude-workflow.git
 /plugin install workflow-discipline@ster-co
 ```
 
-If you chose SSH in step 2, add the marketplace by its SSH URL instead:
+If you chose SSH in step 2, add the `ster-co` marketplace by its SSH URL instead (the first
+line stays HTTPS: that repository is public):
 
 ```
+/plugin marketplace add https://github.com/anthropics/claude-plugins-official.git
 /plugin marketplace add git@github.com:ster-co/claude-workflow.git
 /plugin install workflow-discipline@ster-co
 ```
 
+Use the full URLs, not the `owner/repo` shorthand. The shorthand is cloned over SSH
+(`git@github.com:…`) whichever route you chose, so on a machine with only HTTPS set up it
+fails with "Host key verification failed" or a permission error.
+
+A plugin's commands are named after the plugin: `/ship` is `/workflow-discipline:ship`,
+`/quick` is `/workflow-discipline:quick`, and so on; typing `/` lists them under the
+plugin's name. This document uses the short names. In a non-interactive `claude -p` run,
+only the full name works.
+
 `superpowers` is installed automatically as a dependency — `.claude-plugin/plugin.json`
-declares it. You do not install it separately.
+declares it. You do not install it separately. It comes from Anthropic's official
+marketplace, which is what the first line registers. Claude Code often registers that
+marketplace on its own, but not on every install, and without it the plugin installs and
+then fails to load with "Dependency `superpowers@claude-plugins-official` is not installed".
+If it is already registered, the first line says so and changes nothing.
 
 **Check:** `/plugin` lists both `workflow-discipline@ster-co` and
 `superpowers@claude-plugins-official` as installed and enabled. If
@@ -213,11 +246,11 @@ older `CLAUDE.md` and, sometimes, a broken `settings.json` in place.
 
 ---
 
-## Step 4 — copy `CLAUDE.md`, merge the settings, ignore `.serena/`
+## Step 4 — copy `CLAUDE.md`, merge the settings, ignore `.serena/`, raise the MCP timeout
 
 Step 3 already downloaded the whole repository to
 `~/.claude/plugins/marketplaces/ster-co/` (`%USERPROFILE%\.claude\plugins\marketplaces\ster-co\`
-on Windows). You do not need to clone it. Three things to do from there.
+on Windows). You do not need to clone it. Four things to do from there.
 
 ### 4a. Copy `CLAUDE.md`
 
@@ -276,18 +309,35 @@ grep -qxF '.serena/' "$f" 2>/dev/null || echo '.serena/' >> "$f"
 $f = git config --global --path core.excludesFile
 if (-not $f) { $f = "$env:USERPROFILE\.config\git\ignore" }
 New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null
-if (-not (Select-String -Quiet -SimpleMatch -Pattern '.serena/' -Path $f -ErrorAction SilentlyContinue)) { Add-Content $f '.serena/' }
+if (-not (Test-Path $f) -or -not (Select-String -Quiet -SimpleMatch -Pattern '.serena/' -Path $f)) { Add-Content $f '.serena/' }
 ```
 
 Do not point `core.excludesFile` somewhere new to do this: Claude Code writes its own
 `**/.claude/settings.local.json` rule into whichever file is in effect, and moving it
 orphans that rule.
 
+### 4d. Give Serena time to start
+
+Claude Code gives an MCP server 30 seconds to start, then marks it failed and does not try
+again for about 15 minutes. Serena's first start in a repository can take longer than that:
+`uv` resolves Serena, and the language server for that repository is downloaded. Measured
+on a Windows 11 ARM machine, the start alone took 28 seconds. When that happens, the session
+has no Serena, so every gated edit is denied and the lookup that would unblock it cannot
+run. This raises the limit to two minutes in your own `settings.json`, and leaves a value
+you already set alone:
+
+```
+node -e "const fs=require('fs'),path=require('path'),os=require('os');const file=path.join(os.homedir(),'.claude','settings.json');const s=JSON.parse(fs.readFileSync(file,'utf8'));s.env={MCP_TIMEOUT:'120000',...s.env};fs.writeFileSync(file,JSON.stringify(s,null,2)+'\n');console.log('MCP_TIMEOUT='+s.env.MCP_TIMEOUT)"
+```
+
+It prints `MCP_TIMEOUT=120000` (or the value you already had).
+
 **Check (all of step 4):**
 
 ```
 # the rules file is in place
 head -5 ~/.claude/CLAUDE.md                      # shows "# Global instructions"
+                                                 # Windows: Get-Content ~/.claude/CLAUDE.md -TotalCount 5
 
 # settings merged without hooks, plugin still enabled
 node -e "const s=require(require('os').homedir()+'/.claude/settings.json');console.log('stale hooks:',/\.claude[\\\\/]+hooks[\\\\/]+/.test(JSON.stringify(s.hooks||{}))?'YES - see Troubleshooting':'none');console.log(s.enabledPlugins)"
@@ -490,6 +540,12 @@ still wired to a `hooks` layout that no longer exists — hook commands fail wit
 module", surfaced as every edit and shell command returning no result. Do all four steps,
 every time, not just when something looks broken.
 
+**Once, if you set up before step 4d existed:** run step 4d's command before you update.
+The update script does not edit `settings.json`, and from 0.7.4 on Serena runs on Python
+3.13, so its first start after the update may download that Python. Without 4d's longer
+limit, that start can take more than 30 seconds, and then Claude Code skips Serena for 15
+minutes.
+
 **Run the script — this is the recommended way.** It does all four steps below in one
 command, in plain Node rather than shell syntax, so there is no OS-specific quoting to get
 wrong (a colleague's PowerShell paste of the old copy step broke on backslash escaping he
@@ -571,9 +627,11 @@ edit is.
 | `/mcp` shows `serena` failed | `node` or `uv` missing from the `PATH` Claude Code started with, or, without the plugin, the user-scope relay path is wrong | fully quit and reopen VS Code / the terminal after installing node/uv; without the plugin, check `claude mcp list` shows an absolute path ending in `.claude/bin/serena-relay.cjs` (`.claude\bin\serena-relay.cjs` on Windows) with no literal `~` — if it has one, re-add the entry with step 5 |
 | edits are never denied | repo not configured (above), or the plugin's hooks are not loaded | check `.serena/project.yml`; `/hooks` should list `edit-gate.cjs` under `PreToolUse`; start a new session |
 | every edit is denied, even after a lookup | Serena not connected, so the lookup never succeeds | `/mcp`; start a new session |
+| `/mcp` shows `serena` failed with "Skipping connection (recent failure cached …)" | Claude Code does not retry an MCP server that failed to start for about 15 minutes, even after the cause is fixed | fix the cause first (the rows around this one), then wait the 15 minutes the message names and start a new session. If the cause was only a slow first start, step 4d stops it recurring |
+| `serena` never connects, and its server log (`~/.claude/state/serena/<hash>.log`) says `Microsoft Visual C++ 14.0 or greater is required` | an older plugin version let `uv` pick a Python that one of Serena's dependencies has no prebuilt Windows package for | update the plugin (see Updating); until then, set a user environment variable `UV_PYTHON=3.13` and open a new terminal |
 | `git status` shows `.serena/` | step 4c not done | run 4c |
 | a change to the plugin or settings "does nothing" | old session still running | new session (step 5) |
-| a command acts as if `brainstorming` or `systematic-debugging` doesn't exist | `superpowers` did not install | `/plugin` — install `superpowers@claude-plugins-official` |
+| a command acts as if `brainstorming` or `systematic-debugging` doesn't exist, or `/plugin` shows `workflow-discipline` as "failed to load — Dependency `superpowers@claude-plugins-official` is not installed" | `superpowers` did not install, usually because the official marketplace was not registered | run step 3's first line (`/plugin marketplace add https://github.com/anthropics/claude-plugins-official.git`), then `/plugin install superpowers@claude-plugins-official` |
 | a copy-pasted command from this doc throws a shell parser error (PowerShell `Unexpected token`, or similar) | something about the paste — smart quotes from wherever it was copied, a partial selection, a stray prompt character — broke the shell's own quoting, not this doc | for the update commands specifically, use the `update-plugin.cjs` script instead — see "Updating" below, it has no shell quoting to break; for anything else, retype the command's quotes by hand rather than pasting |
 
 Two environment-variable escape hatches: `CLAUDE_NO_AUTO_REPO_SETUP=1` stops the setup hook
@@ -639,7 +697,14 @@ It prints one pass/fail line per suite; exit code 0 means every suite passed.
   message), the plugin install commands (names read from `.claude-plugin/plugin.json` and
   `.claude-plugin/marketplace.json`; the install itself has not been run on this machine,
   which is the source rather than an install).
-- **Not run on Windows at all.** Every PowerShell command here, and the PowerShell
-  tool-name matchers in the plugin's hooks, come from Claude Code's documentation and from
-  driving the gate scripts on macOS with PowerShell-shaped input. The first colleague on
-  Windows is the real test; if something is wrong, report it.
+- **Run on Windows 11** in a virtual machine (UTM on a Mac; ARM64, Windows PowerShell 5.1,
+  Claude Code 2.1.285), reset to just the four tools and a logged-in Claude Code: step 1's checks, step 2's
+  `git ls-remote` over HTTPS, step 3 (as the equivalent `claude plugin marketplace add` /
+  `claude plugin install` commands), every step 4 command exactly as printed here, step 5's
+  `serena` connected with no `UV_PYTHON` set (Serena on Python 3.13), and step 7's denied
+  edit, lookup and retry. Beyond setup: `/workflow-discipline:quick` from a cold repository
+  (denied edit, lookup, failing test, fix, commit) and a small `/workflow-discipline:ship`,
+  which triaged it as do-it-now and went the same way. The full test suite also passes there,
+  apart from the wiring check, which needs the checkout at `~/.claude`.
+- **Not run on Windows:** step 2's `gh auth login` (that machine's `gh` token had expired),
+  Route B, the VS Code extension, and C#.

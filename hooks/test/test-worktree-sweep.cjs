@@ -43,10 +43,17 @@ const gitc = (args, cwd) => execFileSync('git', args, { cwd, env: GIT_ENV, encod
 // and fake transcripts all land here, never in the real ~/.claude/state.
 const CONFIG = tmp('wts-config-');
 
-// Fake `gh` and `lsof` binaries: the hook is handed their paths via
-// CLAUDE_WORKTREE_SWEEP_GH / CLAUDE_WORKTREE_SWEEP_LSOF, so nothing here
-// depends on a real `gh` login or the machine's actual open files.
+// Fake `gh` and `lsof` binaries: node scripts the hook is handed as a JSON
+// argv via CLAUDE_WORKTREE_SWEEP_GH / CLAUDE_WORKTREE_SWEEP_LSOF, so nothing
+// here depends on a real `gh` login or the machine's actual open files. Node
+// rather than sh so they run on Windows too, where neither a shell script nor
+// a .cmd can be spawned without a shell.
 const FARM = tmp('wts-farm-');
+const nodeStub = (name, src) => {
+  const file = path.join(FARM, name);
+  fs.writeFileSync(file, src);
+  return JSON.stringify([process.execPath, file]);
+};
 // Prints WTS_TEST_GH_JSON UNCONDITIONALLY, then exits according to
 // WTS_TEST_GH_EXIT -- valid-looking merged-PR data on stdout alongside a
 // non-zero exit is exactly the shape gh can take on a real transient
@@ -54,34 +61,25 @@ const FARM = tmp('wts-farm-');
 // parse whatever came out. A stub that only prints when it "succeeds" would
 // let a dropped exit-status check hide behind an empty parse instead of
 // getting caught.
-const ghStub = path.join(FARM, 'gh-stub.sh');
-fs.writeFileSync(ghStub, [
-  '#!/bin/sh',
-  'printf \'%s\' "$WTS_TEST_GH_JSON"',
-  'if [ -n "$WTS_TEST_GH_EXIT" ] && [ "$WTS_TEST_GH_EXIT" != "0" ]; then exit "$WTS_TEST_GH_EXIT"; fi',
-  'exit 0',
+const ghStub = nodeStub('gh-stub.cjs', [
+  "process.stdout.write(process.env.WTS_TEST_GH_JSON || '');",
+  "process.exitCode = Number(process.env.WTS_TEST_GH_EXIT || 0);",
   '',
 ].join('\n'));
-fs.chmodSync(ghStub, 0o755);
 
 // Default: no process anywhere has the worktree as its cwd.
-const lsofEmptyStub = path.join(FARM, 'lsof-empty.sh');
-fs.writeFileSync(lsofEmptyStub, '#!/bin/sh\nexit 0\n');
-fs.chmodSync(lsofEmptyStub, 0o755);
+const lsofEmptyStub = nodeStub('lsof-empty.cjs', '');
 
 // Reports one open cwd, read from WTS_TEST_LSOF_PATH, in the -Fn shape lsof
 // actually emits: a process-id line, then an 'n'-prefixed name line.
-const lsofBusyStub = path.join(FARM, 'lsof-busy.sh');
-fs.writeFileSync(lsofBusyStub, '#!/bin/sh\nprintf \'p99999\\nn%s\\n\' "$WTS_TEST_LSOF_PATH"\n');
-fs.chmodSync(lsofBusyStub, 0o755);
+const lsofBusyStub = nodeStub('lsof-busy.cjs',
+  "process.stdout.write('p99999\\nn' + process.env.WTS_TEST_LSOF_PATH + '\\n');\n");
 
 const lsofMissing = path.join(FARM, 'no-such-lsof-binary');
 
 // Exits non-zero with no output at all — some lsof builds do this on a
 // permissions problem, not only when there is genuinely nothing to report.
-const lsofExit1Stub = path.join(FARM, 'lsof-exit1.sh');
-fs.writeFileSync(lsofExit1Stub, '#!/bin/sh\nexit 1\n');
-fs.chmodSync(lsofExit1Stub, 0o755);
+const lsofExit1Stub = nodeStub('lsof-exit1.cjs', 'process.exitCode = 1;\n');
 
 function today() { return new Date().toISOString().slice(0, 10); }
 // Matches the hook's own repoBackupKey(): repo name plus a short hash of the
@@ -729,20 +727,28 @@ console.log('\nworktree-sweep.cjs — the transcript slug: truncated at 200 char
   // plus a hash once the slug passes that length -- we cannot reproduce the
   // hash, so the match has to fall back to the 200-character prefix the two
   // names share.
-  const { main } = makeFixture();
-  const sha = makeBranch(main, 'fix/longpath');
-  const longSegment = 'x'.repeat(210);
-  const wt = addWorktreeIn(main, 'fix/longpath', longSegment);
-  const fullSlug = slug(fs.realpathSync(wt));
-  check('the fixture actually produces a slug over 200 characters', fullSlug.length > 200, true);
-  const truncatedName = `${fullSlug.slice(0, 200)}-deadbeef01`;
-  const projDir = path.join(CONFIG, 'projects', truncatedName);
-  fs.mkdirSync(projDir, { recursive: true });
-  fs.writeFileSync(path.join(projDir, 'x.jsonl'), '{}\n');
-  const prs = [{ number: 39, headRefName: 'fix/longpath', headRefOid: sha }];
-  const res = cliRun(main, withPRs(prs));
-  check('exits 0', res.code, 0);
-  check('worktree is kept: the truncated transcript dir name still matches', fs.existsSync(wt), true);
+  //
+  // Not on Windows: a worktree path that long passes its 260-character limit,
+  // so git cannot create the fixture there. The truncation itself is string
+  // logic with nothing platform-specific in it.
+  if (process.platform === 'win32') {
+    console.log('  skip (win32: git cannot create a worktree past the 260-character path limit)');
+  } else {
+    const { main } = makeFixture();
+    const sha = makeBranch(main, 'fix/longpath');
+    const longSegment = 'x'.repeat(210);
+    const wt = addWorktreeIn(main, 'fix/longpath', longSegment);
+    const fullSlug = slug(fs.realpathSync(wt));
+    check('the fixture actually produces a slug over 200 characters', fullSlug.length > 200, true);
+    const truncatedName = `${fullSlug.slice(0, 200)}-deadbeef01`;
+    const projDir = path.join(CONFIG, 'projects', truncatedName);
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.writeFileSync(path.join(projDir, 'x.jsonl'), '{}\n');
+    const prs = [{ number: 39, headRefName: 'fix/longpath', headRefOid: sha }];
+    const res = cliRun(main, withPRs(prs));
+    check('exits 0', res.code, 0);
+    check('worktree is kept: the truncated transcript dir name still matches', fs.existsSync(wt), true);
+  }
 }
 
 console.log('\nworktree-sweep.cjs — a failures-only report is still prefixed "Worktree sweep:"');

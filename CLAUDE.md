@@ -82,7 +82,10 @@
   commands or tooling.
 - **A test counts only if you sabotage what it guards, watch it go red, and restore.**
   A check that has never failed proves nothing. State the false conclusion a skipped step
-  would produce.
+  would produce. Inside the `/ship` pipeline this step leaves the implementer's loop: the
+  implementer proves red before its change and green after, the reviewer names one
+  sabotage per test, and the orchestrator performs them once per brief. Everywhere else —
+  `/quick`, a fix in chat — there is no reviewer, so do it yourself.
 - **For anything with a UI, drive a real browser.** A DOM assertion is not evidence.
 - Paste the literal output — the command, its output, and the exit code. Not a summary,
   not "it passed".
@@ -135,6 +138,10 @@
   haiku/low for locating code and files, `reviewer` opus/high for adversarial review,
   `debugger` opus/high for root cause after two failed review rounds. Dispatch by role and
   the routing follows.
+- **`/subagent-mode fast` lowers effort, not the model**, for the four adversarial roles:
+  `reviewer`, `debugger`, `plan-auditor` and `root-cause-auditor` are dispatched as their
+  `-lite` twins (same prompt and model, effort medium) until `/subagent-mode quality`. The
+  per-turn standing rules say when it is on. Unattended ship-loop passes ignore it.
 - **Send verbose work down.** Reading a large file for one answer, scanning a tree,
   summarising test output, checking whether a string appears anywhere — all of it belongs
   in a `scout`: cheap there, and the output never enters the main context. Spend the

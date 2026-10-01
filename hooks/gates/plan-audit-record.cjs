@@ -231,8 +231,11 @@ process.stdin.on('end', () => {
   // "workflow-discipline:plan-auditor" -- accept the bare name or a
   // "<plugin>:plan-auditor" suffix, the same rule gate-arm.cjs already applies
   // to "implementer". A role that merely ends in similar letters without the
-  // `:` separator ("evil-plan-auditor") must not match.
-  const isPlanAuditor = (role) => role === 'plan-auditor' || role.endsWith(':plan-auditor');
+  // `:` separator ("evil-plan-auditor") must not match. `plan-auditor-lite` is
+  // the same auditor at lower effort (agents/plan-auditor-lite.md, picked by
+  // /subagent-mode fast), matched by exact name only.
+  const PLAN_AUDITOR_ROLES = ['plan-auditor', 'plan-auditor-lite'];
+  const isPlanAuditor = (role) => PLAN_AUDITOR_ROLES.some((r) => role === r || role.endsWith(`:${r}`));
   let text;
   if ((input?.hook_event_name || '') === 'SubagentStop') {
     if (!isPlanAuditor(String(input?.agent_type || ''))) process.exit(0);

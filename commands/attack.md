@@ -1,6 +1,6 @@
 ---
 description: Probe or audit a target along adversarial axes — security, correctness, operational excellence, idempotency, reliability, performance, cost.
-argument-hint: [target: working tree, diff, branch, merge commit, path, subsystem, or repo] [axes, optional]
+argument-hint: "[target: working tree, diff, branch, merge commit, path, subsystem, or repo] [axes, optional]"
 # Side effects: fans out parallel opus subagents, and on a Correctness finding the
 # orchestrator briefly breaks and restores a guard in the working tree (Step 4).
 # Trigger by typing /attack, never by the model deciding it looks relevant.

@@ -17,7 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 // hooks/test/verify-all.cjs -> hooks/test -> hooks -> ROOT (the checkout this
 // script lives in, whether that is ~/.claude or a worktree of it).
@@ -41,41 +41,179 @@ function hookCommandPath(command) {
     .replace(/\$\{?HOME\}?/g, os.homedir());
 }
 
-let rc = 0;
+// --- hook behaviour: the unit suites ----------------------------------------
+// This list itself is the only place a suite count is written down -- pool
+// sizing (POOL_CONCURRENCY) and the time budget (SUITE_BUDGET_MS) below are
+// hardcoded constants set once from a real measurement, not derived from
+// this list's length at runtime. The list has already gone stale once, when
+// a same-day 0.7.3 release added test-update-plugin.cjs as a 13th suite
+// while this plan was still being drafted -- so read it fresh here rather
+// than trusting a suite count written down anywhere else (a comment, a plan,
+// a prior brief's report).
+const UNIT_SUITES = [
+  'test-gates.cjs',
+  'test-plan-gate.cjs',
+  'test-verify-checkpoint.cjs',
+  'test-run-state-registry.cjs',
+  'test-agent-log.cjs',
+  'test-repo-setup.cjs',
+  'test-worktree-sweep.cjs',
+  'test-test-delta.cjs',
+  'test-serena-registry.cjs',
+  'test-serena-relay.cjs',
+  'test-ship-loop.cjs',
+  'test-ship-loop-launch.cjs',
+  'test-update-plugin.cjs',
+  // Tests this file's own pool/budget/serial-exception logic, the same
+  // pattern test-test-delta.cjs already uses to test test-delta.cjs.
+  'test-verify-all.cjs',
+];
 
-// --- hook behaviour: the 8 unit suites -------------------------------------
+// test-verify-checkpoint.cjs has two lock-timing races (search this repo for
+// `swap.js` or `H3` if this comment's line reference has drifted): the
+// review-file read-modify-write, and the lock-release token check, are both
+// timing-dependent under contention. Running it inside the pool would
+// recreate exactly the contention that trips them. Serializing it here --
+// not fixing either race -- is this task's whole scope.
+//
+// test-run-state-registry.cjs joined this list after the fact, not by
+// original design: the first parallel measurement below failed with it
+// still in the pool (a wall-clock assertion at test-run-state-registry.cjs
+// around "and it did not have to wait out a leaked lock" -- search that
+// string if the line has drifted -- assumes a lock poll/acquire completes
+// well under 2s, which does not hold once it is sharing the machine with
+// three other suites' worth of real `git`/`node` spawns). A reviewer-led
+// reproduction on this same code confirmed the pool itself as the cause:
+// failed in 2 of 3 runs with the suite inside the pool, passed clean in all
+// 3 standalone runs with it outside. Per the plan's "if something looks
+// wrong" instruction, this is recorded as a newly-surfaced load-sensitive
+// suite and serialized, not fixed -- the assertion itself is not touched.
+const SERIAL_SUITES = ['test-verify-checkpoint.cjs', 'test-run-state-registry.cjs'];
+
+// This machine has 10 logical cores (os.cpus().length). Firing every
+// pool-eligible suite at once would recreate the same contention the
+// findings doc measured (a full serial run finished 731s FASTER than the sum
+// of its suites timed standalone -- i.e. contention inflates a scattered
+// sequence of runs more than one contiguous run) and risks tripping the very
+// race SERIAL_SUITES exists to dodge. 4 is a deliberately small fraction of
+// the core count, leaving headroom for this machine's normal condition of
+// other concurrent Claude Code sessions; it is also the concurrency the real
+// measurement below was taken at.
+const POOL_CONCURRENCY = 4;
+
+// Set from the real parallel measurement recorded in
+// docs/2026-09-28-test-speed-findings.md ("Measured, 2026-09-28": 530.18s
+// clean, all 13 suites passing), at a ~50% margin above it -- generous
+// enough that ordinary machine noise does not flap the budget, tight enough
+// that a real regression still fails loudly.
+const SUITE_BUDGET_MS = 795000; // 795s = 530.18s measured * 1.5
+
 // A pipeline's exit status is the LAST command's. The bash version once ran
 // these as `node test.cjs | tail -2`, which reported tail's status -- always
 // 0 -- so a red unit test could not fail the script. It reported success over
 // two failing assertions on 2026-09-22. Capture the child's status directly;
 // never pipe it through something else's exit code.
-function unit(script) {
-  const r = spawnSync('node', [path.join(HOOKS, 'test', script)], { encoding: 'utf-8' });
-  const out = (r.stdout || '') + (r.stderr || '');
-  const lines = out.split('\n');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  console.log(lines.slice(-2).join('\n'));
-  const status = r.status === null ? 1 : r.status;
-  if (status !== 0) {
-    rc = 1;
-    console.log(`  ^^ FAILED (exit ${status}): node ${script}`);
-  }
+//
+// spawnSync blocks the event loop for the whole child process, so two
+// spawnSync calls can never overlap no matter how they are scheduled.
+// Parallel execution needs the event loop free between suites, so this
+// spawns async and resolves once the child closes.
+function unitScript(script, dir = path.join(HOOKS, 'test')) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    let out = '';
+    let child;
+    try {
+      child = spawn('node', [path.join(dir, script)]);
+    } catch (e) {
+      resolve({ script, status: 1, out: `${e.message}\n`, wallMs: Date.now() - start });
+      return;
+    }
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('error', (e) => { out += `${e.message}\n`; });
+    child.on('close', (status) => {
+      resolve({ script, status: status === null ? 1 : status, out, wallMs: Date.now() - start });
+    });
+  });
 }
 
+// A minimal bounded pool: `concurrency` lanes each pull the next item off the
+// shared queue until it is empty, so at most `concurrency` suites ever run at
+// once regardless of how many are queued -- not a Promise.all over every item
+// at once, which would just be "run everything" under a different name.
+async function runPool(items, concurrency, worker) {
+  let next = 0;
+  const laneCount = Math.max(1, Math.min(concurrency, items.length));
+  async function lane() {
+    while (next < items.length) {
+      const item = items[next++];
+      await worker(item);
+    }
+  }
+  await Promise.all(Array.from({ length: laneCount }, lane));
+}
+
+// The exported, parameterizable suite-runner: this file's own script and
+// hooks/test/test-verify-all.cjs both call it -- the former with the real
+// suite list and no overrides, the latter with fake fast scripts and a `dir`
+// override so its assertions run in milliseconds instead of ~15 minutes.
+// `serial` suites run one at a time, strictly BEFORE the pool starts, so
+// they structurally cannot overlap it (never "before or after" decided at
+// random -- always before, so the ordering is deterministic and testable).
+// Output always prints in `suites`' own order, regardless of completion
+// order, so a diff against a prior run stays meaningful.
+async function runUnitSuites(suites, opts = {}) {
+  const {
+    serial = [],
+    concurrency = POOL_CONCURRENCY,
+    budgetMs = SUITE_BUDGET_MS,
+    dir = path.join(HOOKS, 'test'),
+    runOne = unitScript,
+  } = opts;
+  const serialSet = new Set(serial);
+  const serialList = suites.filter((s) => serialSet.has(s));
+  const parallelList = suites.filter((s) => !serialSet.has(s));
+
+  const results = new Map();
+  const t0 = Date.now();
+  for (const script of serialList) {
+    results.set(script, await runOne(script, dir));
+  }
+  await runPool(parallelList, concurrency, async (script) => {
+    results.set(script, await runOne(script, dir));
+  });
+  const totalMs = Date.now() - t0;
+
+  let rc = 0;
+  for (const script of suites) {
+    const r = results.get(script);
+    const lines = r.out.split('\n');
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    console.log(`  ${script} (${(r.wallMs / 1000).toFixed(2)}s)`);
+    console.log(lines.slice(-2).join('\n'));
+    if (r.status !== 0) {
+      rc = 1;
+      console.log(`  ^^ FAILED (exit ${r.status}): node ${script}`);
+    }
+  }
+  const budgetLabel = Number.isFinite(budgetMs) ? `${(budgetMs / 1000).toFixed(2)}s` : 'none';
+  console.log(`  total: ${(totalMs / 1000).toFixed(2)}s (budget ${budgetLabel}, concurrency ${concurrency})`);
+  if (totalMs > budgetMs) {
+    rc = 1;
+    console.log(`  ^^ FAILED: total wall time ${(totalMs / 1000).toFixed(2)}s exceeded the ${(budgetMs / 1000).toFixed(2)}s budget`);
+  }
+  return { rc, totalMs, results };
+}
+
+async function main() {
+let rc = 0;
+
 console.log('== hook behaviour ==');
-unit('test-gates.cjs');
-unit('test-plan-gate.cjs');
-unit('test-verify-checkpoint.cjs');
-unit('test-run-state-registry.cjs');
-unit('test-agent-log.cjs');
-unit('test-repo-setup.cjs');
-unit('test-worktree-sweep.cjs');
-unit('test-test-delta.cjs');
-unit('test-serena-registry.cjs');
-unit('test-serena-relay.cjs');
-unit('test-ship-loop.cjs');
-unit('test-ship-loop-launch.cjs');
-unit('test-update-plugin.cjs');
+{
+  const { rc: unitRc } = await runUnitSuites(UNIT_SUITES, { serial: SERIAL_SUITES });
+  if (unitRc) rc = 1;
+}
 
 // --- settings.json is valid and wired ---------------------------------------
 console.log();
@@ -383,6 +521,468 @@ console.log('== ${CLAUDE_PLUGIN_ROOT} convention accompanies every ~/.claude/hoo
   }
 })();
 
+// --- reviewer/orchestrator verification contract (solo-brief dedup) --------
+// Task 2 of docs/plans/2026-09-28-test-runs.md: a solo brief's reviewer already
+// runs the authoritative test-delta.cjs pass against the reviewed tree, and
+// /execute's own step 3 rerun of the same command against the same tree is a
+// second full run that tells the orchestrator nothing new. The skip only fires
+// when both halves of the contract hold, so this checks both sides: the
+// reviewer has to name the exact invocation in its report (not "rerun the
+// suite" left ambiguous), the reviewer's TESTS line has to carry test-delta's
+// own "on <repo>@<branch>" label (hooks/test-delta.cjs:300) so the report says
+// which tree was tested, and /execute's solo-brief step has to state both the
+// reuse condition and that the recorded label must match this brief's own
+// worktree and branch before it trusts that recorded result instead of
+// re-running.
+//
+// Checking for the bare "test-delta.cjs --command" substring anywhere in
+// reviewer.md is not enough: the file's own "## TESTS" output-contract
+// EXAMPLE always contains that string (it is the example of what to paste),
+// so a check that only greps the whole file stays green even if the actual
+// mandate bullet above the example is reverted to "rerun the suite" left
+// ambiguous. Scope the mandate check to the text BEFORE "## TESTS" instead.
+// Likewise, checking only for the reuse token in execute.md misses that the
+// token names the skip ACTION but not its CONDITIONS -- deleting "For a solo
+// (non-group) brief only" or the label-match clause would leave a bare
+// reuse-token check green, so each required condition is checked as its own
+// substring.
+//
+// A command/label match alone still does not prove the recorded run PASSED:
+// a reviewer could approve a brief that broke a test, write a TESTS line with
+// the exact right command and label, and the orchestrator would skip its own
+// rerun and cite that line -- committing a regression its own rerun would
+// have caught. The fix keys on test-delta.cjs's OWN process exit code and its
+// own final "test-delta:" verdict line, never on the "`cmd` exit N on
+// <label>" line test-delta.cjs prints mid-run for the raw command's first
+// run (hooks/test-delta.cjs:300) -- that line's exit code is a different
+// number from test-delta.cjs's own exit and can disagree with it in either
+// direction (a red baseline or non-repeating flake prints exit 1 there while
+// test-delta.cjs itself exits 0; a piped test command can print exit 0 there
+// while test-delta.cjs itself blocks with exit 1). So this also checks that
+// the mandate tells the reviewer to record test-delta.cjs's own exit code and
+// verdict line, that the TESTS template has fields for them, and that
+// execute.md's skip condition requires exit 0 plus a passing verdict line.
+//
+// A command/label/exit-code match still is not enough: round 3 closed the
+// gap above by keying the skip on `git status --short` staying unchanged
+// since the reviewer's round, but that is a status-LETTER comparison (e.g.
+// "M reviewer.md") -- it cannot distinguish two different CONTENTS of a file
+// that was already modified before and after. Concrete failure: the reviewer
+// runs test-delta (green), then during its own review process touches,
+// sabotages or imperfectly restores an owned file -- `git status --short`
+// prints "M f" both before and after, identically, so the tripwire stays
+// silent and the skip fires over a tree that was never actually verified in
+// its final form. Round 4 replaced that comparison with a content-addressed
+// hash, using the same mechanism execute.md's own per-round snapshot step
+// already uses: `git add -A && git stash create`. But round 4 keyed the
+// comparison on the resulting COMMIT sha itself, and `git stash create`
+// bakes an author/committer timestamp into that commit object, so invoking
+// it twice against a byte-identical tree returns two different commit shas
+// -- the orchestrator's freshly-computed sha would then never equal the
+// reviewer's recorded one, even when nothing changed, so the skip could
+// never fire (safe, but it silently defeats the whole point of this
+// mechanism). The fix (round 5) is to resolve and compare the commit's
+// `^{tree}` object instead -- deterministic for identical content
+// regardless of invocation time -- falling back to `git rev-parse
+// HEAD^{tree}` on an already-clean tree (where `git stash create` prints
+// nothing). So this checks three more things: the reviewer's mandate tells
+// it to resolve that `^{tree}` hash and report it (not the raw stash/HEAD
+// commit sha, and not called a "content fingerprint"), the `## TESTS`
+// template has a field for the tree hash, and execute.md's skip requires
+// the orchestrator's own freshly-computed `^{tree}` hash to EXACTLY MATCH
+// the one the reviewer recorded -- not merely that `git status --short`
+// looks the same, and not a bare commit-sha comparison either.
+console.log();
+console.log('== reviewer/orchestrator verification contract (solo-brief dedup) ==');
+(function reviewerOrchestratorContract() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const norm = (s) => s.replace(/\s+/g, ' ').trim();
+
+  const reviewerText = fs.readFileSync(path.join(AGENTS, 'reviewer.md'), 'utf8');
+  // Anchor on the literal heading LINE, not a bare substring: the mandate
+  // prose above it references "your `## TESTS` line" in running text, and a
+  // plain indexOf would match that prose mention first, truncating
+  // mandateSection long before the real mandate bullet ends and leaking most
+  // of the mandate into testsSection instead. Match the heading with a
+  // multiline regex rather than indexOf('\n## TESTS\n'): this suite is meant
+  // to run on a Windows checkout with no .gitattributes forcing LF (see the
+  // file header), where Git for Windows checks files out with CRLF line
+  // endings -- an LF-only indexOf would find -1 there and FAIL on a correct,
+  // unmodified install for no reason but the platform's line endings.
+  const testsHeadingMatch = /^## TESTS\r?$/m.exec(reviewerText);
+  if (!testsHeadingMatch) {
+    fail('agents/reviewer.md has no ## TESTS heading to check the mandate bullet against');
+    return;
+  }
+  const testsMarkerIdx = testsHeadingMatch.index;
+  const mandateSection = reviewerText.slice(0, testsMarkerIdx);
+  const testsSection = reviewerText.slice(testsMarkerIdx);
+
+  const mandatePhrase = norm(
+    'Rerun the tests yourself, by running exactly this — never "rerun the suite" left ambiguous'
+  );
+  if (!norm(mandateSection).includes(mandatePhrase) || !mandateSection.includes('test-delta.cjs --command')) {
+    fail(
+      "agents/reviewer.md no longer mandates the exact test-delta.cjs --command invocation " +
+      "outside the ## TESTS example (the example alone does not count)"
+    );
+    return;
+  }
+  console.log('  ok   agents/reviewer.md mandates the exact test-delta.cjs --command invocation outside the ## TESTS example');
+
+  if (!testsSection.includes('test-delta.cjs --command') || !testsSection.includes('on <repo>@<branch>')) {
+    fail("agents/reviewer.md's ## TESTS example no longer requires the test-delta.cjs on <repo>@<branch> label");
+    return;
+  }
+  console.log('  ok   agents/reviewer.md\'s ## TESTS example requires the on <repo>@<branch> label');
+
+  // The command/label check above is not enough on its own: a reviewer could
+  // record the right command and label yet never check whether the run it
+  // produced actually PASSED, and the orchestrator's skip below would then
+  // cite a recorded run that covered a regression. Two more things have to be
+  // on record: the mandate must tell the reviewer to capture test-delta.cjs's
+  // OWN process exit code (never the test command's echoed exit code, which
+  // is a different number and can disagree with test-delta's verdict in
+  // either direction), and the ## TESTS template must carry a place to write
+  // that exit code and test-delta's own final verdict line down, distinct
+  // from the pre-existing "<exact counts> on <repo>@<branch>" text.
+  const mandateExitPhrases = [
+    "test-delta.cjs's own process exit code",
+    'never the exit code of the test command echoed',
+    'verdict line verbatim',
+  ];
+  const missingMandateExit = mandateExitPhrases.filter((p) => !norm(mandateSection).includes(norm(p)));
+  if (missingMandateExit.length) {
+    fail(
+      "agents/reviewer.md's mandate no longer tells the reviewer to record test-delta.cjs's " +
+      `own exit code (distinct from the echoed test-command exit) and its verdict line: missing ${missingMandateExit.join(' | ')}`
+    );
+    return;
+  }
+  console.log("  ok   agents/reviewer.md mandates recording test-delta.cjs's own exit code and verdict line, distinct from the echoed test-command exit");
+
+  if (!testsSection.includes('test-delta.cjs own exit code') || !testsSection.includes('Verdict:')) {
+    fail("agents/reviewer.md's ## TESTS template has no separate field for test-delta.cjs's own exit code and verdict line");
+    return;
+  }
+  console.log("  ok   agents/reviewer.md's ## TESTS template has separate fields for test-delta.cjs's own exit code and verdict line");
+
+  // Round 4's fix: an exit-code/verdict match still does not prove the tree
+  // the orchestrator would trust is the tree the reviewer actually tested,
+  // because the round-3 tripwire (`git status --short` unchanged) is a
+  // status-LETTER comparison that cannot tell two different contents of an
+  // already-modified file apart. The mandate now has to tell the reviewer to
+  // resolve a `^{tree}` hash of the tree the moment its test-delta run
+  // finishes -- the same `git stash create` mechanism execute.md's own
+  // snapshot step uses, but resolved to the tree object rather than the
+  // commit sha, and the `## TESTS` template needs a field to write that
+  // tree hash down. (Round 5: the commit sha itself is unusable here --
+  // `git stash create` bakes an author/committer timestamp into the commit
+  // it writes, so the same command run twice against a byte-identical tree
+  // returns two different commit shas. Only the `^{tree}` hash is
+  // deterministic for identical content, so this checks for the tree-hash
+  // wording specifically and rejects the file still calling the raw
+  // stash/HEAD sha a "content fingerprint".)
+  const mandateTreeHashPhrases = [
+    'tree hash',
+    'git add -A && git stash create',
+    '^{tree}',
+    'git rev-parse HEAD^{tree}',
+  ];
+  const missingMandateTreeHash = mandateTreeHashPhrases.filter((p) => !norm(mandateSection).includes(norm(p)));
+  if (missingMandateTreeHash.length) {
+    fail(
+      "agents/reviewer.md's mandate no longer tells the reviewer to resolve the ^{tree} hash " +
+      `of the tree at the moment its test-delta run finishes: missing ${missingMandateTreeHash.join(' | ')}`
+    );
+    return;
+  }
+  console.log('  ok   agents/reviewer.md mandates resolving a git-stash-create ^{tree} hash of the tree when its test-delta run finishes');
+
+  if (mandateSection.includes('content fingerprint')) {
+    fail(
+      'agents/reviewer.md\'s mandate still calls the raw stash/HEAD commit sha a "content ' +
+      'fingerprint" -- git stash create bakes a timestamp into that commit object, so it ' +
+      'must resolve and report the deterministic ^{tree} hash instead'
+    );
+    return;
+  }
+  console.log('  ok   agents/reviewer.md no longer calls the raw stash/HEAD commit sha a "content fingerprint"');
+
+  if (!testsSection.includes('Tree hash')) {
+    fail("agents/reviewer.md's ## TESTS template has no field for the tree hash");
+    return;
+  }
+  console.log("  ok   agents/reviewer.md's ## TESTS template has a field for the tree hash");
+
+  const executeText = fs.readFileSync(path.join(COMMANDS, 'execute.md'), 'utf8');
+  const stepStart = executeText.indexOf('Run one suite pass');
+  const stepEnd = stepStart === -1 ? -1 : executeText.indexOf('**Commit**', stepStart);
+  if (stepStart === -1 || stepEnd === -1) {
+    fail('commands/execute.md no longer has a "Run one suite pass" step to check');
+    return;
+  }
+  const stepText = norm(executeText.slice(stepStart, stepEnd));
+  const requiredPieces = [
+    'For a solo (non-group) brief only',
+    "skip the orchestrator's own rerun and cite the reviewer's recorded result",
+    'on <repo>@<branch>',
+    "matches this brief's own worktree directory name and current branch",
+    // The fourth required condition: the recorded run has to have actually
+    // PASSED, judged by test-delta.cjs's own exit code and verdict line --
+    // not by the unrelated "`cmd` exit N on <label>" line test-delta prints
+    // for the raw test command's first run, which this repo has reproduced
+    // disagreeing with test-delta's own verdict in both directions.
+    'the recorded test-delta.cjs exit code is 0 and its verdict line is one of the passing forms',
+    'nothing newly failing',
+    'not blocking',
+    'no baseline existed, so this run is the baseline',
+    "never the test command's echoed",
+    'never to the group pass',
+    // Round 4's fix: the fifth required condition replaces the round-3
+    // git-status-letter tripwire with a content-addressed one -- the skip
+    // must require the orchestrator's own freshly computed hash to exactly
+    // match the one the reviewer recorded, computed with the same
+    // git-stash-create mechanism execute.md's own snapshot step uses. Round
+    // 5: that hash has to be the commit's `^{tree}` object, not the commit
+    // sha itself, since `git stash create` returns a different commit sha
+    // on every invocation (timestamped) even against an unchanged tree.
+    'EXACTLY MATCHES the tree hash the',
+    'git add -A && git stash create',
+    '^{tree}',
+    'git rev-parse HEAD^{tree}',
+  ];
+  const missing = requiredPieces.filter((piece) => !stepText.includes(norm(piece)));
+  if (missing.length) {
+    fail(`commands/execute.md's solo-brief step is missing: ${missing.join(' | ')}`);
+    return;
+  }
+  console.log('  ok   commands/execute.md states the solo-brief reuse condition, including the worktree/branch-label, test-delta-passed, and tree-hash-match checks');
+
+  if (stepText.includes(norm('`git status --short` shows the tree unchanged since that round'))) {
+    fail(
+      "commands/execute.md's solo-brief step still keys the skip on the old " +
+      "`git status --short` tripwire, which cannot tell two different contents of an " +
+      'already-modified file apart -- it must require an exact tree-hash match instead'
+    );
+    return;
+  }
+  console.log('  ok   commands/execute.md no longer keys the skip on the git-status-letter tripwire');
+
+  if (norm(executeText.slice(stepStart, stepEnd)).includes('fingerprint')) {
+    fail('commands/execute.md\'s solo-brief step still calls the mechanism a "fingerprint" instead of a tree hash');
+    return;
+  }
+  console.log('  ok   commands/execute.md no longer calls the mechanism a "fingerprint"');
+})();
+
+// --- /brief's House rules template states a fast/full test-command split ---
+// Task 3 of docs/plans/2026-09-28-test-runs.md: /brief's House rules block used
+// to hand every role a single `Tests:` command, so the implementer's per-file
+// changed-test run (agents/implementer.md's "run only the tests related to
+// the change" bullet) and the reviewer/orchestrator/`/land` full-suite run
+// shared one line -- correct for the full run, but leaving the implementer to
+// invent a fast command from scratch each session instead of the repo writing
+// one down once. The template now needs BOTH `Tests (full):` (the renamed
+// original line, still what the reviewer, orchestrator and `/land` run) and
+// `Tests (fast):` (the per-repo changed-file command, filled in by /brief only
+// when a real command is confirmed against the repo -- `TBD` otherwise, per
+// the plan's "do not invent commands" rule, never a guess). Scoped to the
+// "House rules block" section specifically, not the whole file, so a stray
+// "Tests (fast):" or "Tests (full):" mention anywhere else in the file could
+// not paper over the actual template still missing one.
+console.log();
+console.log("== /brief's House rules template states a fast/full test-command split ==");
+(function briefFastFullTests() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const briefText = fs.readFileSync(path.join(COMMANDS, 'brief.md'), 'utf8');
+  const blockStart = briefText.indexOf('## House rules block');
+  const blockEnd = blockStart === -1 ? -1 : briefText.indexOf('## Brief template', blockStart);
+  if (blockStart === -1 || blockEnd === -1) {
+    fail('commands/brief.md has no "House rules block" section to check');
+    return;
+  }
+  const block = briefText.slice(blockStart, blockEnd);
+  const missing = ['Tests (full):', 'Tests (fast):'].filter((tok) => !block.includes(tok));
+  if (missing.length) {
+    fail(`commands/brief.md's House rules block template is missing: ${missing.join(', ')}`);
+    return;
+  }
+  console.log("  ok   commands/brief.md's House rules block template states both Tests (full): and Tests (fast):");
+})();
+
+// --- the -lite agents mirror their base agents ------------------------------
+// /subagent-mode fast swaps these four roles for a `-lite` twin: the same
+// prompt, model and tools at effort medium. A twin whose body drifts from its
+// base is a different reviewer wearing the same name, and nothing else would
+// notice -- so the body must stay byte-identical and the frontmatter may differ
+// only in name, description suffix and effort.
+console.log();
+console.log('== the -lite agents mirror their base agents ==');
+(function liteAgentsMirrorBase() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const split = (file) => {
+    const text = fs.readFileSync(file, 'utf8');
+    const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    if (!m) return null;
+    const fm = {};
+    for (const line of m[1].split('\n')) {
+      const i = line.indexOf(':');
+      if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    }
+    return { fm, body: m[2] };
+  };
+  const problems = [];
+  const bases = ['reviewer', 'debugger', 'plan-auditor', 'root-cause-auditor'];
+  for (const base of bases) {
+    const litePath = path.join(AGENTS, `${base}-lite.md`);
+    if (!fs.existsSync(litePath)) { problems.push(`agents/${base}-lite.md is missing`); continue; }
+    const b = split(path.join(AGENTS, `${base}.md`));
+    const l = split(litePath);
+    if (!b || !l) { problems.push(`${base}: frontmatter does not parse`); continue; }
+    // Same key set as the base: a key only the twin carries (a permissionMode,
+    // say) would change what the "same agent at lower effort" can do.
+    const keys = (fm) => Object.keys(fm).sort().join(',');
+    if (keys(l.fm) !== keys(b.fm)) problems.push(`${base}-lite: frontmatter keys [${keys(l.fm)}] differ from base [${keys(b.fm)}]`);
+    if (l.fm.name !== `${base}-lite`) problems.push(`${base}-lite: name is "${l.fm.name}"`);
+    if (l.fm.model !== b.fm.model) problems.push(`${base}-lite: model "${l.fm.model}" differs from base "${b.fm.model}"`);
+    if (l.fm.tools !== b.fm.tools) problems.push(`${base}-lite: tools differ from base`);
+    if (l.fm.effort !== 'medium') problems.push(`${base}-lite: effort is "${l.fm.effort}", want "medium"`);
+    if (!(l.fm.description || '').startsWith(b.fm.description || '\0')) problems.push(`${base}-lite: description does not start with the base description`);
+    if (l.body !== b.body) problems.push(`${base}-lite: body has drifted from agents/${base}.md`);
+  }
+  if (problems.length) { fail(`-lite agents: ${problems.join('; ')}`); return; }
+  console.log(`  ok   ${bases.length} -lite agents match their base in body, model and tools, at effort medium`);
+})();
+
+// --- /subagent-mode exists and is documented ---------------------------------
+// discipline-reminder.cjs reads <config>/subagent-mode; the command is the only
+// sanctioned writer, and CLAUDE.md's routing section is where a reader learns
+// the toggle exists.
+console.log();
+console.log('== /subagent-mode exists and is documented ==');
+(function subagentModeCommand() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const cmdPath = path.join(COMMANDS, 'subagent-mode.md');
+  if (!fs.existsSync(cmdPath)) { fail('commands/subagent-mode.md is missing'); return; }
+  const cmd = fs.readFileSync(cmdPath, 'utf8');
+  const missing = ['disable-model-invocation: true', '/subagent-mode', 'SHIP_LOOP_PASS']
+    .filter((tok) => !cmd.includes(tok));
+  if (missing.length) { fail(`commands/subagent-mode.md is missing: ${missing.join(', ')}`); return; }
+  if (!fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf8').includes('/subagent-mode')) {
+    fail('CLAUDE.md does not mention /subagent-mode'); return;
+  }
+  console.log('  ok   commands/subagent-mode.md exists, is user-only, and CLAUDE.md names it');
+})();
+
+// --- inside the /ship pipeline, sabotage leaves the implementer's loop --------
+// The implementer proves a new test by seeing it red before its change
+// (red -> green on the fast command) and runs no separate sabotage pass. The
+// reviewer names one sabotage per new or changed test; the orchestrator
+// performs them serially after the review. The reviewer cannot do it itself:
+// it has no Edit tool, the edit gate refuses a Bash edit without a lookup it
+// has no tool for, and reviewers in a parallel group share one worktree. The
+// global rule in CLAUDE.md and its plugin mirror stays in force outside the
+// pipeline. Each file is checked for the sentence that carries its part.
+console.log();
+console.log('== inside the /ship pipeline, sabotage leaves the implementer\'s loop ==');
+(function sabotageOwnedByReviewer() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  // Whitespace is collapsed before matching: these files are hard-wrapped
+  // prose, and a sentence split across two lines must still match (or still
+  // be caught when it should be gone).
+  const read = (...p) => fs.readFileSync(path.join(ROOT, ...p), 'utf8').replace(/\s+/g, ' ');
+  const problems = [];
+  if (!read('agents', 'implementer.md').includes('No separate sabotage pass')) {
+    problems.push('agents/implementer.md does not say it runs no separate sabotage pass');
+  }
+  const rev = read('agents', 'reviewer.md');
+  const fullStart = rev.indexOf('## Mandatory checks (full review)');
+  const fullEnd = rev.indexOf('## Light review', fullStart);
+  if (fullStart === -1 || fullEnd === -1) { fail('agents/reviewer.md has no full-review section to check'); return; }
+  const full = rev.slice(fullStart, fullEnd);
+  if (!full.includes('Name one sabotage for each new or changed test')) {
+    problems.push("agents/reviewer.md's full review does not name a sabotage per test");
+  }
+  // The full-review bullet itself mentions `## SABOTAGE`, so the section is
+  // looked for in the output contract only.
+  const contractStart = rev.indexOf('## Output contract');
+  if (contractStart === -1 || !rev.slice(contractStart).includes('## SABOTAGE')) {
+    problems.push("agents/reviewer.md's output contract has no ## SABOTAGE section");
+  }
+  // Scoped to the step itself. A green sabotage or a missing section must also
+  // count as a review round, or a reviewer whose sabotage never reaches the
+  // assertion loops implementer -> reviewer forever without the debugger firing.
+  const exec = read('commands', 'execute.md');
+  const stepStart = exec.indexOf("Perform the reviewer's named sabotages");
+  const stepEnd = exec.indexOf('Run one suite pass', stepStart);
+  if (stepStart === -1 || stepEnd === -1) {
+    problems.push("commands/execute.md has no \"Perform the reviewer's named sabotages\" step before the suite pass");
+  } else {
+    const step = exec.slice(stepStart, stepEnd);
+    for (const tok of ['mktemp', 'never with `git checkout -- <file>`', 'run-state.cjs review-round']) {
+      if (!step.includes(tok)) problems.push(`commands/execute.md's sabotage step is missing: ${tok}`);
+    }
+  }
+  const brief = read('commands', 'brief.md');
+  const houseStart = brief.indexOf('## House rules block');
+  const houseEnd = brief.indexOf('## Brief template', houseStart);
+  if (houseStart === -1 || houseEnd === -1) { fail('commands/brief.md has no "House rules block" section to check'); return; }
+  const house = brief.slice(houseStart, houseEnd);
+  if (house.includes('A test counts only if you sabotage what it guards')) {
+    problems.push("commands/brief.md's House rules still hand the sabotage step to the implementer");
+  }
+  if (!house.includes('the reviewer names one sabotage per test and the orchestrator performs it')) {
+    problems.push("commands/brief.md's House rules do not say who names and who performs the sabotage");
+  }
+  for (const f of [['CLAUDE.md'], ['skills', 'workflow-discipline', 'SKILL.md']]) {
+    if (!read(...f).includes("Inside the `/ship` pipeline this step leaves the implementer's loop")) {
+      problems.push(`${f.join('/')} does not scope the sabotage rule inside /ship`);
+    }
+  }
+  if (problems.length) { fail(problems.join('; ')); return; }
+  console.log('  ok   implementer, reviewer, /execute, /brief, CLAUDE.md and workflow-discipline agree: the reviewer names each sabotage, the orchestrator performs it');
+})();
+
+// --- the do-it-now threshold is stated the same way everywhere ---------------
+// /quick escalates past it, and /ship's and /blueprint's triage route under it
+// to /quick. If the three procedures disagree, triage sends work to /quick
+// that /quick then refuses (or the reverse). The threshold counts only
+// behaviour-bearing code -- a test, a doc line or a generated file carries no
+// behaviour risk -- and a change to a gate escalates at any size, because a
+// one-character slip there silently disables a check. The docs must not keep
+// quoting the old size-only numbers.
+console.log();
+console.log('== the do-it-now threshold is stated the same way everywhere ==');
+(function doItNowThreshold() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const read = (...p) => fs.readFileSync(path.join(ROOT, ...p), 'utf8').replace(/\s+/g, ' ');
+  const SIZE = 'at most 5 files and about 80 changed lines of behaviour-bearing code';
+  const GATE = 'no change to a gate, permission or auth check';
+  const OLD = [/\b3 files\b/, /≤3 files/, /\b30 (changed )?lines/];
+  const problems = [];
+  const procedures = [['commands', 'quick.md'], ['commands', 'ship.md'], ['commands', 'blueprint.md']];
+  const docs = [['README.md'], ['docs', 'CHEATSHEET.md'], ['docs', 'COMMANDS.md']];
+  for (const f of procedures) {
+    const text = read(...f);
+    for (const tok of [SIZE, GATE]) if (!text.includes(tok)) problems.push(`${f.join('/')} is missing "${tok}"`);
+  }
+  for (const f of [...procedures, ...docs]) {
+    const text = read(...f);
+    if (OLD.some((re) => re.test(text))) problems.push(`${f.join('/')} still states the old 3-file / 30-line threshold`);
+  }
+  // The docs paraphrase the threshold, so they are held to its defining phrase
+  // rather than the procedures' exact sentence.
+  for (const f of docs) {
+    if (!read(...f).includes('lines of behaviour-bearing code')) problems.push(`${f.join('/')} does not state the threshold in behaviour-bearing lines`);
+  }
+  if (!read('commands', 'quick.md').includes('Tests (fast):')) {
+    problems.push("commands/quick.md's change path does not point at the repo's Tests (fast): command");
+  }
+  if (problems.length) { fail(problems.join('; ')); return; }
+  console.log(`  ok   ${procedures.length} procedures state one threshold, and no procedure or doc keeps the old numbers`);
+})();
+
 // --- hooks.json does not drift from settings.json ----------------------------
 // hooks/hooks.json is what the plugin ships; settings.json is what this repo
 // runs. A colleague who installs the plugin never sees settings.json at all,
@@ -586,6 +1186,38 @@ console.log("== the plan gate's contract with its own documentation ==");
 // --- slash commands ----------------------------------------------------------
 console.log();
 console.log('== slash commands ==');
+// Claude Code parses command and agent frontmatter as YAML. A value it cannot
+// parse is logged as "Failed to parse YAML frontmatter" and the file loads
+// without it. Two unquoted forms have done that here: a value opening with `[`
+// that is more than one bracketed group (`[target: …] [axes, optional]` is a
+// flow sequence followed by stray text), and a plain value containing `: `
+// (`(effort medium): dispatch …` reads as a second mapping). Quote the value
+// whenever it needs either. No YAML parser is available dependency-free, so this
+// checks exactly those two forms rather than YAML in general.
+(function frontmatterParses() {
+  const bad = [];
+  for (const dir of [COMMANDS, AGENTS]) {
+    for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.md')).sort()) {
+      const m = fs.readFileSync(path.join(dir, f), 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (!m) continue;
+      for (const line of m[1].split(/\r?\n/)) {
+        const kv = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
+        if (!kv) continue;
+        const value = kv[2].trim();
+        if (/^["']/.test(value)) continue;
+        const rel = `${path.basename(dir)}/${f} ${kv[1]}`;
+        if (value.startsWith('[') && !/^\[[^[\]]*\]$/.test(value)) bad.push(`${rel} (more than one bracketed group)`);
+        else if (!value.startsWith('[') && /: /.test(value)) bad.push(`${rel} (unquoted ": ")`);
+      }
+    }
+  }
+  if (bad.length) {
+    console.log(`  FAIL frontmatter values YAML cannot parse -- quote them: ${bad.join('; ')}`);
+    rc = 1;
+    return;
+  }
+  console.log('  ok   every command and agent frontmatter value is YAML-parseable (no stray bracket groups, no unquoted ": ")');
+})();
 for (const f of fs.readdirSync(COMMANDS).filter((n) => n.endsWith('.md')).sort()) {
   const text = fs.readFileSync(path.join(COMMANDS, f), 'utf8');
   const line = text.split('\n').find((l) => l.startsWith('description:')) || '';
@@ -671,4 +1303,10 @@ console.log('== gated repos (a .serena/project.yml is what turns the gates on) =
   }
 })();
 
-process.exit(rc);
+  return rc;
+}
+
+module.exports = { runUnitSuites, unitScript, runPool, UNIT_SUITES, SERIAL_SUITES, POOL_CONCURRENCY, SUITE_BUDGET_MS };
+if (require.main === module) {
+  main().then((rc) => process.exit(rc)).catch((e) => { console.error(e); process.exit(1); });
+}

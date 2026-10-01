@@ -18,6 +18,7 @@ function runPidSafetyTests(source, check) {
       child_process: { spawnSync: forbidden('spawnSync') },
       crypto: {}, fs: {}, os: {}, path,
       './gates/gate-lib.cjs': { STATE_DIR: '/mock-state' },
+      './run-state.cjs': { replaceFile: forbidden('replaceFile') },
     };
     const context = vm.createContext({
       module,

@@ -147,7 +147,9 @@ function repoRootFor(cwd) {
     const top = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: realCwd, encoding: 'utf8', timeout: 5000,
     }).trim();
-    return top || realCwd;
+    // Git for Windows prints `C:/…`; resolving puts it in the platform's own
+    // form, the one realpathSync returns and typedRootFor compares against.
+    return top ? path.resolve(top) : realCwd;
   } catch { return realCwd; }
 }
 
@@ -308,7 +310,11 @@ function willStage(shell, cwd) {
       if (SEPARATOR.test(tok)) break;
       if (tok.startsWith('-')) continue;
       const abs = path.resolve(base, tok.replace(/^['"]|['"]$/g, ''));
-      out.push(path.relative(cwd, abs));
+      // In git's own form (forward slashes), which is what isPlan matches and
+      // what `git diff --cached --name-only` prints. path.relative uses `\` on
+      // Windows, and a plan staged in the same command as the commit would
+      // otherwise never be recognised as a plan.
+      out.push(path.relative(cwd, abs).split(path.sep).join('/'));
     }
     i = g.at;
   }

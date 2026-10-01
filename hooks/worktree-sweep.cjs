@@ -61,8 +61,23 @@ const STATE_DIR = path.join(CONFIG_DIR, 'state', 'worktree-sweep');
 const BACKUPS_DIR = path.join(STATE_DIR, 'backups');
 const PROJECTS_DIR = path.join(CONFIG_DIR, 'projects');
 
-const GH_BIN = process.env.CLAUDE_WORKTREE_SWEEP_GH || 'gh';
-const LSOF_BIN = process.env.CLAUDE_WORKTREE_SWEEP_LSOF || 'lsof';
+// The argv prefix `gh` and `lsof` run as. A test stands a stub in for either:
+// a path to run, or a JSON array of argv (`["node", "stub.cjs"]`) for a stub
+// Windows could not run by path, since without a shell it runs only .exe and
+// .com files there. A value that does not parse as one is run as a path, so a
+// bad override fails the spawn -- "could not ask" -- rather than the hook.
+function stubArgv(value, bin) {
+  if (!value) return [bin];
+  if (value.startsWith('[')) {
+    try {
+      const argv = JSON.parse(value);
+      if (Array.isArray(argv) && argv.length && argv.every((a) => typeof a === 'string')) return argv;
+    } catch { /* run as a path below */ }
+  }
+  return [value];
+}
+const GH_CMD = stubArgv(process.env.CLAUDE_WORKTREE_SWEEP_GH, 'gh');
+const LSOF_CMD = stubArgv(process.env.CLAUDE_WORKTREE_SWEEP_LSOF, 'lsof');
 
 const DEFAULT_KEEP = ['main', 'master', 'develop', 'TST', 'ACC'];
 const EXTRA_KEEP = (process.env.CLAUDE_WORKTREE_SWEEP_KEEP || '')
@@ -176,7 +191,7 @@ function writeStamp(commonDir) {
 // Null means "could not ask" (gh missing, not logged in, network down) —
 // callers must treat that as "do nothing", not as "no PRs".
 function mergedPRs(cwd) {
-  const r = spawnSync(GH_BIN, ['pr', 'list', '--state', 'merged', '--limit', '300',
+  const r = spawnSync(GH_CMD[0], [...GH_CMD.slice(1), 'pr', 'list', '--state', 'merged', '--limit', '300',
     '--json', 'number,headRefName,headRefOid'], { cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS });
   if (r.error || r.status !== 0) return null;
   try { return JSON.parse(r.stdout || '[]'); } catch { return null; }
@@ -285,7 +300,7 @@ function statusAllowed(worktreePath) {
 // filter, not only when there is genuinely nothing to report, so "could not
 // ask" must never read as "asked, and the answer is no".
 function processCwds() {
-  const r = spawnSync(LSOF_BIN, ['-a', '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 5000 });
+  const r = spawnSync(LSOF_CMD[0], [...LSOF_CMD.slice(1), '-a', '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 5000 });
   if (r.error || r.status !== 0) return null;
   const names = [];
   for (const line of (r.stdout || '').split('\n')) {

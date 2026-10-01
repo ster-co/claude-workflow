@@ -118,6 +118,20 @@ function fakeCmd(logFile, extra = []) {
 // exec), so the wrapper can stat `$1/.serena/project.yml` for itself, with no
 // fixture edit needed.
 function fakeCmdRecordingConfig(logFile, markerFile) {
+  if (process.platform === 'win32') {
+    // No /bin/sh, and no exec: a node wrapper records the same fact, then
+    // loads the fixture in its own process, so the wrapper's pid is the
+    // server's.
+    const wrapper = path.join(CONFIG, 'record-config.cjs');
+    fs.writeFileSync(wrapper, [
+      "const fs = require('fs'), path = require('path');",
+      "const [root, marker, fake, port, log] = process.argv.slice(2);",
+      "fs.writeFileSync(marker, fs.existsSync(path.join(root, '.serena', 'project.yml')) ? 'present\\n' : 'absent\\n');",
+      "process.argv = [process.argv[0], fake, '--port', port, '--log', log, '--root', root];",
+      "require(fake);",
+    ].join('\n'));
+    return JSON.stringify([process.execPath, wrapper, '{root}', markerFile, FAKE, '{port}', logFile]);
+  }
   const script = [
     'if [ -e "$1/.serena/project.yml" ]; then echo present > "$2"; else echo absent > "$2"; fi;',
     'exec "$3" "$4" --port "$5" --log "$6" --root "$1"',
@@ -469,7 +483,15 @@ async function main() {
 
   // ---------------------------------------------------------------------------
   console.log('\nserena-relay.cjs — SIGTERM and SIGINT also stop the server of the last client');
-  {
+  if (process.platform === 'win32') {
+    // A signal cannot reach a handler on Windows: process.kill / ChildProcess#kill
+    // terminate the process outright, and neither SIGTERM nor SIGINT is ever
+    // delivered to the relay's handlers. A session ending there closes the
+    // relay's stdin, which the closing section above covers.
+    console.log('  skip (win32 cannot deliver SIGTERM/SIGINT to a handler)');
+    C.close();
+    await C.waitExit();
+  } else {
     const server2 = reg.read(key2).pid;
     C.child.kill('SIGTERM');
     const cExit = await C.waitExit();
@@ -1014,7 +1036,10 @@ async function main() {
     // A relay ended by a signal closes its own session too, as the server
     // stays up for L and N.
     const markTerm = logEvents(log12).length;
-    M.child.kill('SIGTERM');
+    // Windows cannot deliver SIGTERM to a handler (see the signal section
+    // above), so there M ends the way a session ends: its stdin closes. The
+    // release, and so the DELETE, is the same.
+    if (process.platform === 'win32') M.close(); else M.child.kill('SIGTERM');
     check('relay M exits on SIGTERM', (await M.waitExit()).code, 0);
     check('relay M closed its own session with DELETE before it exited, and no other',
       logEvents(log12).slice(markTerm).filter((x) => x.ev === 'delete').map((x) => x.session === eM.session && x.known), [true]);
@@ -1033,7 +1058,21 @@ async function main() {
   // kern.ipc.somaxconn) queue behind a long tool call. The fake listens with a
   // backlog of 1 here, and the fillers are this suite's own sockets.
   console.log('\nserena-relay.cjs — a busy server with a full listen backlog is waited on, never stopped');
-  {
+  if (process.platform === 'win32') {
+    // Windows does not drop the SYN of a connect its accept queue has no room
+    // for: it refuses it, the same answer as a port nobody listens on. The
+    // relay cannot tell the two apart there, so a busy server whose queue
+    // filled up (measured on the test VM: a listen backlog of 1 still queues
+    // 33 connects) is read as not listening. The premise below cannot hold.
+    //
+    // KNOWN GAP, not a test artefact: on Windows a relay that meets such a
+    // server treats it as dead and replaces it, which stops a tool call another
+    // session is waiting on. Reaching it needs more queued connects than the
+    // accept queue holds -- dozens of sessions polling one busy server at once.
+    // Telling "full" from "not listening" there needs a design change (e.g.
+    // trusting a server that has answered before), so it is recorded, not fixed.
+    console.log('  skip, KNOWN GAP on win32: a full accept queue refuses connects instead of leaving them pending, so a busy server whose queue filled up is read as not listening and replaced');
+  } else {
     const repo14 = tmpRepo('fourteen');
     const log14 = path.join(CONFIG, 'repo14.log');
     allLogs.push(log14);
@@ -1113,8 +1152,21 @@ async function main() {
     await Z.handshake();
     const eZ = await Z.echo();
     ok('relay Z is served', eZ.pid);
-    Z.child.stdout.pause();
-    Z.send({ jsonrpc: '2.0', id: ++Z.seq, method: 'tools/call', params: { name: 'big', arguments: { size: 4_000_000 } } });
+    // A client that stops reading holds the relay in its flush on stdin end,
+    // which is what keeps it alive while its in-flight request meets the
+    // stopped server. On win32 a write to a pipe nobody reads blocks the whole
+    // relay (stdout pipes are synchronous there: no timer, no stdin event runs
+    // until the pipe is read), so the relay is not stalled that way there.
+    const stallStdout = process.platform !== 'win32';
+    // Without the stall the relay can exit before its in-flight echo meets the
+    // stopped server, so on win32 the checks below still hold but no longer
+    // prove the reconnect guard: deleting it leaves this section green there
+    // (measured). Test W covers the guard, on the platforms that can stage it.
+    if (!stallStdout) console.log('  note: on win32 this section cannot stage the reconnect it guards against; the guard itself is covered on POSIX');
+    if (stallStdout) {
+      Z.child.stdout.pause();
+      Z.send({ jsonrpc: '2.0', id: ++Z.seq, method: 'tools/call', params: { name: 'big', arguments: { size: 4_000_000 } } });
+    }
     Z.send({ jsonrpc: '2.0', method: 'notifications/fake_hang' });
     Z.send({ jsonrpc: '2.0', id: ++Z.seq, method: 'tools/call', params: { name: 'echo', arguments: { after: 'hang' } } });
     await until(() => logEvents(log13).some((x) => x.ev === 'request' && x.method === 'notifications/fake_hang'), 5000,
@@ -1127,7 +1179,7 @@ async function main() {
     const rec = reg.read(key13);
     ok('relay Z\'s pid is not in the record (MUST-NOT register while shutting down)', !rec || !rec.clients.includes(Z.pid));
     ok('Z, the last client, stopped the server', !reg.isAlive(eZ.pid));
-    Z.child.stdout.resume();
+    if (stallStdout) Z.child.stdout.resume();
   }
 
   // ---------------------------------------------------------------------------
@@ -1136,7 +1188,12 @@ async function main() {
   // reading what is left. Here the client stops reading, so the flush of a
   // 4 MB reply would otherwise hold the relay for the rest of FLUSH_MS (5 s).
   console.log('\nserena-relay.cjs — a signal during the flush on stdin end exits at once');
-  {
+  if (process.platform === 'win32') {
+    // Neither half can exist on Windows: no signal reaches a handler, and a
+    // relay whose client stopped reading is blocked inside its stdout write
+    // rather than waiting in a flush window.
+    console.log('  skip (win32 cannot deliver SIGTERM to a handler, and a stdout pipe nobody reads blocks the relay outright)');
+  } else {
     const repo15 = tmpRepo('fifteen');
     const log15 = path.join(CONFIG, 'repo15.log');
     allLogs.push(log15);
@@ -1631,9 +1688,15 @@ async function main() {
     const ymlUnknown = path.join(unknown, '.serena', 'project.yml');
     const logUnknown = path.join(CONFIG, 'notice-unknown.log');
     allLogs.push(logUnknown);
-    const shimDir = gitCheckIgnoreShim(128);
+    // POSIX: a `git` shim on PATH answering check-ignore with 128. Windows
+    // starts only executables, so there git itself is made to fail the same
+    // way (exit 128, "not a git repository") by pointing GIT_DIR at nothing;
+    // check-ignore is the only git call the relay makes.
+    const gitCannotAnswer = process.platform === 'win32'
+      ? { GIT_DIR: path.join(os.tmpdir(), 'no-such-git-dir') }
+      : { PATH: `${gitCheckIgnoreShim(128)}${path.delimiter}${process.env.PATH}` };
     const T = new Relay(unknown, fakeCmd(logUnknown, ['--root', '{root}']), {
-      ...gitIsolation, PATH: `${shimDir}${path.delimiter}${process.env.PATH}`,
+      ...gitIsolation, ...gitCannotAnswer,
     });
     await T.handshake();
     const echoT = await T.request('tools/call', { name: 'echo', arguments: {} });
@@ -1642,6 +1705,56 @@ async function main() {
       echoT.result && echoT.result.content.length, 1);
     T.close();
     check('relay T exits 0', (await T.waitExit()).code, 0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // With no SERENA_RELAY_SERVER_CMD the relay runs the real `uv tool run`, and
+  // that command pins Serena's Python. Unpinned, uv picks the newest Python it
+  // manages; on Windows that is one serena-agent's pyyaml has no wheel for, so
+  // uv compiles it, fails without MSVC, and Serena never starts. A `uv` shim on
+  // PATH records the argv the relay spawns and exits, which is all this needs.
+  // The shim is a shell script on POSIX. Windows starts only executables
+  // (spawn does not run a .cmd), so there it is a copy of node.exe named
+  // uv.exe: node takes `tool` for its script, and a preload, loaded first,
+  // records the arguments and exits 1 the same way.
+  console.log('\nserena-relay.cjs — the real server command pins the Python it runs on');
+  {
+    const repo = tmpRepo('uv-argv', { 'app/main.py': 'x = 1\n' });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uv-shim-'));
+    trash.push(dir);
+    const argvFile = path.join(dir, 'argv.txt');
+    let shimEnv;
+    if (process.platform === 'win32') {
+      const preload = path.join(dir, 'record-argv.cjs');
+      fs.writeFileSync(preload, [
+        "const path = require('path');",
+        // NODE_OPTIONS reaches the relay itself too, which is also node.
+        "if (path.basename(process.execPath).toLowerCase() !== 'uv.exe') return;",
+        `require('fs').appendFileSync(${JSON.stringify(argvFile)}, [path.basename(process.argv[1]), ...process.argv.slice(2)].join('\\n') + '\\n');`,
+        'process.exit(1);',
+      ].join('\n'));
+      fs.copyFileSync(process.execPath, path.join(dir, 'uv.exe'));
+      // (NODE_OPTIONS reads a backslash inside quotes as an escape, hence the
+      // forward slashes.) The variable's spelling in process.env is `Path` on Windows; a second
+      // key spelled `PATH` would sit beside it in the child's environment.
+      const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+      shimEnv = { [pathKey]: `${dir}${path.delimiter}${process.env[pathKey]}`, NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"` };
+    } else {
+      fs.writeFileSync(path.join(dir, 'uv'), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(argvFile)}\nexit 1\n`);
+      fs.chmodSync(path.join(dir, 'uv'), 0o755);
+      shimEnv = { PATH: `${dir}${path.delimiter}${process.env.PATH}` };
+    }
+    const U = new Relay(repo, '', shimEnv);
+    await U.request('initialize', {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' },
+    }, 15_000).catch(() => null);
+    const argv = fs.existsSync(argvFile) ? fs.readFileSync(argvFile, 'utf8').split('\n') : [];
+    const at = argv.indexOf('--python');
+    check('the relay spawned `uv tool run` for the real server', argv.slice(0, 2).join(' '), 'tool run');
+    check('...with --python 3.13, ahead of --from serena-agent',
+      at !== -1 && at < argv.indexOf('--from') ? argv[at + 1] : null, '3.13');
+    U.close();
+    check('relay U exits 0', (await U.waitExit()).code, 0);
   }
 
   // ---------------------------------------------------------------------------
@@ -1819,6 +1932,10 @@ async function main() {
       check('... with the path made relative to B\'s root', folded.args, { relative_path: path.join('src', 'c.cjs') });
       check('one server listened for B, and no record was keyed on the other spelling (MUST-NOT)',
         [at(realB, 'listen').length, reg.read(reg.repoKey(upperB).key)], [1, null]);
+    } else if (process.platform === 'win32' && fs.existsSync(upperB)) {
+      // repoKey lower-cases the root there, so both spellings are one key and
+      // one server, which is the point of folding the case.
+      check('on win32 both spellings of B key the same server', reg.repoKey(upperB).key, keyB);
     } else {
       console.log('  skip (a case-sensitive filesystem: the other spelling names no directory)');
     }
@@ -1840,6 +1957,8 @@ async function main() {
       check('... and an absolute path inside it in the on-disk spelling, made relative to its root',
         [gAbs.root, gAbs.args], [gRoot, { relative_path: path.join('src', 'h.cjs') }]);
       check('... and started no server for the on-disk spelling beside H\'s (MUST-NOT)', at(realA, 'listen').length, 1);
+    } else if (process.platform === 'win32' && fs.existsSync(upperA)) {
+      check('on win32 both spellings of A key the same server', reg.repoKey(upperA).key, reg.repoKey(repoA).key);
     } else {
       console.log('  skip (a case-sensitive filesystem: the other spelling names no directory)');
     }

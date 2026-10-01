@@ -362,17 +362,58 @@ const atFile = (() => {
   throw new Error('atomic-feature.json was never written');
 })();
 
-const before = fs.readFileSync(atFile, 'utf-8');
-const preFd = fs.openSync(atFile, 'r');
+// The inode argument is POSIX's. Windows refuses to rename over a file any
+// process holds open, so a descriptor held across the whole write is a write
+// that can never land there; the reader case below is what Windows can prove.
+if (process.platform === 'win32') {
+  console.log('  skip (win32 cannot rename over a file held open across the write)');
+} else {
+  const before = fs.readFileSync(atFile, 'utf-8');
+  const preFd = fs.openSync(atFile, 'r');
 
-rs(['phase', 'executing'], { cwd: ATREPO, session: ATS });
+  rs(['phase', 'executing'], { cwd: ATREPO, session: ATS });
 
-const after = fs.readFileSync(atFile, 'utf-8');
-const seenByPreFd = fs.readFileSync(preFd, 'utf-8');
-fs.closeSync(preFd);
+  const after = fs.readFileSync(atFile, 'utf-8');
+  const seenByPreFd = fs.readFileSync(preFd, 'utf-8');
+  fs.closeSync(preFd);
 
-check('the write actually changed the file on disk', after === before, false);
-check('a handle opened before the write still sees the old content', seenByPreFd, before);
+  check('the write actually changed the file on disk', after === before, false);
+  check('a handle opened before the write still sees the old content', seenByPreFd, before);
+}
+
+// A reader that has the run file open at the instant of the rename -- a hook
+// reading it from another process -- must delay the write, not lose it. On
+// Windows that rename fails with EPERM while the handle is open, and failing
+// on the first attempt lost the update. Here a separate process holds the file
+// open across a `phase` call: until the writer's temp file appears (the rename
+// is next), then 300 ms more. A fixed hold from the start would expire before
+// a slow process start ever reached the rename, and prove nothing.
+{
+  const ready = path.join(ATREPO, '.holder-ready');
+  const holder = require('child_process').spawn(process.execPath, ['-e', `
+    const fs = require('fs');
+    const path = require('path');
+    const file = ${JSON.stringify(atFile)};
+    const fd = fs.openSync(file, 'r');
+    fs.writeFileSync(${JSON.stringify(ready)}, '');
+    const tmpPrefix = '.' + path.basename(file) + '.';
+    const deadline = Date.now() + 10000;
+    const poll = setInterval(() => {
+      const seen = fs.readdirSync(path.dirname(file)).some((n) => n.startsWith(tmpPrefix) && n.endsWith('.tmp'));
+      if (!seen && Date.now() < deadline) return;
+      clearInterval(poll);
+      setTimeout(() => fs.closeSync(fd), 300);
+    }, 1);
+  `], { stdio: 'ignore' });
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(ready) && Date.now() < deadline) { /* wait for the open */ }
+  check('the reader holds the run file open', fs.existsSync(ready), true);
+  const beforeHeld = fs.readFileSync(atFile, 'utf-8');
+  const held = rs(['phase', 'landing'], { cwd: ATREPO, session: ATS });
+  check('a phase write while another process reads the file succeeds', held.code, 0);
+  check('and the file on disk changed', fs.readFileSync(atFile, 'utf-8') === beforeHeld, false);
+  holder.kill();
+}
 
 // =============================================================================
 console.log('\nbegin-brief and finish-brief refuse a missing brief number');
@@ -989,12 +1030,18 @@ async function raceMain() {
   for (let i = 0; i < 10; i++) {
     await spawnAsync(['begin-brief', '4'], { cwd: RRREPO, session: rrSession });
     const before = rs(['get'], { cwd: RRREPO, session: rrSession }).json?.inFlight?.['4']?.reviewRounds || 0;
-    await Promise.all([
+    const bumps = await Promise.all([
       spawnAsync(['review-round', '4'], { cwd: RRREPO, session: rrSession }),
       spawnAsync(['review-round', '4'], { cwd: RRREPO, session: rrSession }),
     ]);
     const after = rs(['get'], { cwd: RRREPO, session: rrSession }).json?.inFlight?.['4']?.reviewRounds || 0;
-    if (after - before !== 2) roundLoss++;
+    if (after - before !== 2) {
+      roundLoss++;
+      // A refused lock (non-zero exit) and a silently lost update are
+      // different bugs; say which one this was.
+      console.log(`  round ${i}: ${before} -> ${after}; exits ${bumps.map((b) => b.code).join(', ')}; `
+        + `stderr ${JSON.stringify(bumps.map((b) => b.stderr.trim()).filter(Boolean))}`);
+    }
     rs(['finish-brief', '4'], { cwd: RRREPO, session: rrSession });
   }
   check('10x concurrent review-round x2 always lands both bumps', roundLoss, 0);
@@ -1532,8 +1579,13 @@ async function raceMain() {
     const aposStart = spawnWithConfig(['start', '--feature', 'apos-feature'], APOSREPO, 'sess-apos-0002');
     const startRmLine = (aposStart.stderr.match(/rm '.*'/) || [])[0];
     check('the stale-lock error contains an rm line', typeof startRmLine, 'string');
+    // The rm lines are for Claude Code's Bash tool, which on Windows is Git
+    // Bash -- not on PATH there, but always at <git root>\bin\bash.exe, three
+    // levels above `git --exec-path`.
+    const bash = process.platform !== 'win32' ? 'bash' : path.resolve(
+      spawnSync('git', ['--exec-path'], { encoding: 'utf-8' }).stdout.trim(), '..', '..', '..', 'bin', 'bash.exe');
     if (startRmLine) {
-      const startCmd = spawnSync('bash', ['-n'], { input: startRmLine, encoding: 'utf-8' });
+      const startCmd = spawnSync(bash, ['-n'], { input: startRmLine, encoding: 'utf-8' });
       check('and that rm line parses as valid shell despite the apostrophe in the path',
         startCmd.status, 0);
     }
@@ -1542,7 +1594,7 @@ async function raceMain() {
     const unlockRmLine = (aposUnlock.stdout.match(/rm '.*'/) || [])[0];
     check('unlock also prints an rm line for the apostrophe-bearing path', typeof unlockRmLine, 'string');
     if (unlockRmLine) {
-      const unlockCmd = spawnSync('bash', ['-n'], { input: unlockRmLine, encoding: 'utf-8' });
+      const unlockCmd = spawnSync(bash, ['-n'], { input: unlockRmLine, encoding: 'utf-8' });
       check('and unlock\'s own rm line is valid shell too',
         unlockCmd.status, 0);
     }

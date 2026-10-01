@@ -131,8 +131,10 @@ whether this chat is already driving a run:
 
 - **Use when:** a question, a brainstorm, a bug, or a change that is small and obvious —
   **do-it-now** territory, without going through `/ship` to get there.
-- **Threshold, estimated before editing anything:** at most 3 files, about 30 changed lines,
-  no design call, a cause that reproduces, and no shared resource outside this checkout (a
+- **Threshold, estimated before editing anything:** at most 5 files and about 80 changed
+  lines of behaviour-bearing code (tests, docs and generated files do not count), no design
+  call, no change to a gate, permission or auth check (at any size), a cause that
+  reproduces, and no shared resource outside this checkout (a
   deploy, a migration, a production tenant). Crossing it, even mid-change, stops the command
   and hands off to `/diagnose` or `/ship` — any edits already made are left uncommitted and
   reported, never reverted and never committed.
@@ -184,6 +186,17 @@ whether this chat is already driving a run:
 
 - Writes lasting findings to a file.
 - Prints one ready-to-paste opening prompt for the next session.
+
+---
+
+### `/subagent-mode` — trade reasoning effort for tokens on the adversarial roles
+
+- `fast`: `reviewer`, `debugger`, `plan-auditor` and `root-cause-auditor` are dispatched as
+  their `-lite` twins — the same prompt, model and tools at effort medium.
+- `quality` (the default, and what no setting means): the full-effort agents.
+- No argument: shows the current mode.
+- Shared by every session on this machine; unattended ship-loop passes always use the full
+  agents.
 
 ---
 

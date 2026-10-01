@@ -86,6 +86,7 @@ const step = steps[Math.min(idx, steps.length - 1)] || {};
 fs.writeFileSync(idxFile, String(idx + 1));
 fs.appendFileSync(path.join(stateDir, 'calls.jsonl'), JSON.stringify({
   argv: process.argv.slice(2), sessionEnv: process.env.CLAUDE_CODE_SESSION_ID,
+  shipLoopPass: process.env.SHIP_LOOP_PASS,
 }) + '\\n');
 const cwd = process.cwd();
 
@@ -152,6 +153,17 @@ function mkFakeClaude() {
   return dir;
 }
 
+// The env that makes the driver's `claude` the fake in `fakeDir`: first on
+// PATH. Windows runs only claude.exe/.com as `claude` without a shell, never
+// this script-file fake, so there the driver is pointed at it through node.
+function fakeClaudeEnv(fakeDir) {
+  const env = { PATH: `${fakeDir}${path.delimiter}${process.env.PATH}` };
+  if (process.platform === 'win32') {
+    env.SHIP_LOOP_CLAUDE_CMD = JSON.stringify([process.execPath, path.join(fakeDir, 'claude')]);
+  }
+  return env;
+}
+
 // A curated PATH containing ONLY the directories `node` and `git` actually
 // live in on this machine -- deliberately excluding both the fake-claude dir
 // and the inherited PATH's real `claude` install. This is the ONLY safe way
@@ -215,6 +227,7 @@ function runLoop(repo, steps, { extraArgs = [], configJson = null, pauseAt = nul
     CLAUDE_CONFIG_JSON: configJson || mkConfigJson(cfgDir, []),
     SHIP_LOOP_TEST_SLEEP_LOG: sleepLog,
   };
+  if (claudeOnPath) Object.assign(env, fakeClaudeEnv(fakeDir));
   if (home) env.HOME = home;
   if (pauseAt !== null) args.push('--pause-at', String(pauseAt));
 
@@ -719,7 +732,7 @@ console.log('\nstall detection: two no-change passes STALL, a commit between the
   ]));
   const env = {
     ...process.env,
-    PATH: `${fakeDir}${path.delimiter}${process.env.PATH}`,
+    ...fakeClaudeEnv(fakeDir),
     FAKE_CLAUDE_STATE_DIR: stateDir,
     FAKE_CLAUDE_STEPS_FILE: stepsFile,
     FAKE_CLAUDE_RUN_STATE: RUN_STATE,
@@ -746,6 +759,9 @@ console.log('\nmodels: opus by default, --model overrides every pass, --plan-mod
   const argv = calls[0].argv;
   const i = argv.indexOf('--model');
   checkTrue('with no model flags, the pass uses --model opus', i >= 0 && argv[i + 1] === 'opus');
+  // discipline-reminder.cjs keys off this to keep /subagent-mode fast out of
+  // unattended passes, which must always dispatch the full-effort agents.
+  check('the pass runs with SHIP_LOOP_PASS=1 in its environment', calls[0].shipLoopPass, '1');
 }
 
 {
@@ -779,7 +795,7 @@ console.log('\nmodels: opus by default, --model overrides every pass, --plan-mod
   ]));
   const env = {
     ...process.env,
-    PATH: `${fakeDir}${path.delimiter}${process.env.PATH}`,
+    ...fakeClaudeEnv(fakeDir),
     FAKE_CLAUDE_STATE_DIR: stateDir,
     FAKE_CLAUDE_STEPS_FILE: stepsFile,
     FAKE_CLAUDE_RUN_STATE: RUN_STATE,

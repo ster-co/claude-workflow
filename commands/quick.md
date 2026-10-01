@@ -44,7 +44,10 @@ paths in the same turn.
 - **bug** → reproduce it, fix it, verify it. No `root-cause-auditor` — if the cause will not
   reproduce, that is the escalation condition below, not a reason to theorise further.
 - **change** → edit it, run the tests related to the change (plus a new regression test when
-  behaviour changes, not just prose or config), read the diff yourself, then commit.
+  behaviour changes, not just prose or config), read the diff yourself, then commit. "Related"
+  means the repo's fast command where one is written down — a brief file's House rules
+  `Tests (fast):` line, or the repo's own `CLAUDE.md` — and otherwise the test files next to
+  what you changed. The full suite is not part of `/quick`.
 
 Print one status line per step, so a wrong turn is visible before the next one starts.
 
@@ -55,10 +58,19 @@ file count and line count, then decide whether this fits `/quick` before touchin
 Discovering the threshold after half the edits are made is the failure this step exists to
 prevent — starting the estimate late does not make the change any smaller.
 
+The work fits `/quick` at **at most 5 files and about 80 changed lines of behaviour-bearing
+code** — tests, docs and generated files do not count, because they carry no behaviour risk —
+with no design call, **no change to a gate, permission or auth check** (or anything else that
+decides whether something runs), a cause that reproduces, and no `Serial:`-class resource.
+Size is only a proxy; a one-character slip in a gate silently disables a check, so a gate
+escalates at any size.
+
 Stop and name `/diagnose` or `/ship` — do not push further into this session — when any of
 these holds:
 
-- **more than 3 files or about 30 changed lines**;
+- **more than 5 files or about 80 changed lines of behaviour-bearing code**;
+- **a change to a gate, permission or auth check**, or to anything that decides whether
+  something else runs — at any size;
 - **a design call** — more than one reasonable approach, or a trade-off the user should pick;
 - **a cause that will not reproduce**;
 - **a `Serial:`-class resource** — a deploy, a migration, a production tenant, or anything

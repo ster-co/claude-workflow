@@ -59,6 +59,16 @@ process.stdin.on('end', () => {
     rules.push('- This repo is gated: look up what references a symbol before editing it, and read the diff before committing. No tool resolves a string reference, so confirm with a grep where one is plausible.');
   }
 
+  // /subagent-mode writes <configDir>/subagent-mode. Only the exact value
+  // "fast" changes anything; absent, "quality" or anything else means the
+  // full-effort agents. An unattended ship-loop pass (SHIP_LOOP_PASS=1, set by
+  // bin/ship-loop.cjs) always gets the full-effort agents.
+  let mode = '';
+  try { mode = fs.readFileSync(path.join(configDir, 'subagent-mode'), 'utf-8').trim(); } catch { /* absent = quality */ }
+  if (mode === 'fast' && process.env.SHIP_LOOP_PASS !== '1') {
+    rules.push('- Subagent mode is fast (/subagent-mode): dispatch reviewer-lite, debugger-lite, plan-auditor-lite and root-cause-auditor-lite in place of reviewer, debugger, plan-auditor and root-cause-auditor.');
+  }
+
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: rules.join('\n') },
     suppressOutput: true,

@@ -167,6 +167,34 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
   check('and nothing is reported', context(res), '');
 }
 
+// Finds `bin` on this process's PATH. On Windows a command is `git.exe`, not
+// `git`, and which extensions count is PATHEXT's to say -- the same rule
+// `where` applies -- so a bare-name lookup that ignores it finds nothing there.
+const which = (bin) => {
+  const exts = process.platform === 'win32'
+    ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)]
+    : [''];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    for (const ext of exts) {
+      const p = path.join(dir, bin + ext);
+      try { if (fs.statSync(p).isFile()) return p; } catch { /* not in this dir */ }
+    }
+  }
+  return null;
+};
+
+// Puts `target` into the PATH farm `dir` under its own file name, so the farm
+// resolves `git` (`git.exe` on Windows) to the real binary. A symlink where the
+// platform allows one; Windows without Developer Mode or elevation refuses
+// symlinks (EPERM), and a copy stands in for it there.
+const farmLink = (dir, target) => {
+  const dest = path.join(dir, path.basename(target));
+  try { fs.symlinkSync(target, dest); } catch (e) {
+    if (process.platform !== 'win32' || e.code !== 'EPERM') throw e;
+    fs.copyFileSync(target, dest);
+  }
+};
+
 // It must not depend on `bash` (or the python3 heredoc the shell script used)
 // to write the config: a Windows machine without Git Bash has neither. Proved
 // by stripping PATH down to nothing but git's and node's own directories — if
@@ -176,21 +204,14 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
 // exists would pass on this machine either way, since it has bash; this one
 // would not.
 {
-  const which = (bin) => {
-    for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-      const p = path.join(dir, bin);
-      try { if (fs.statSync(p).isFile()) return p; } catch { /* not in this dir */ }
-    }
-    return null;
-  };
   const gitBin = which('git');
   const finder = process.platform === 'win32' ? 'where' : 'which';
   const finderBin = which(finder);
   const uvxBin = which('uvx');
   const farm = fs.mkdtempSync(path.join(os.tmpdir(), 'nobash-'));
   trash.push(farm);
-  fs.symlinkSync(gitBin, path.join(farm, 'git'));
-  fs.symlinkSync(process.execPath, path.join(farm, 'node'));
+  farmLink(farm, gitBin);
+  farmLink(farm, process.execPath);
   // uvx (and the resolver used to find it) must also be reachable here: this
   // farm is proving bash-independence, not uvx detection, which has its own
   // test below.
@@ -198,10 +219,14 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
   // bash-independence, and it must build on a machine that has no uvx at all --
   // which is precisely the machine the uvx-absent test below is about. A
   // symlink to a null path throws and takes the whole suite down with it.
-  if (finderBin) fs.symlinkSync(finderBin, path.join(farm, finder));
-  const uvxStub = path.join(farm, 'uvx');
-  if (uvxBin) fs.symlinkSync(uvxBin, uvxStub);
-  else { fs.writeFileSync(uvxStub, '#!/bin/sh\nexit 0\n'); fs.chmodSync(uvxStub, 0o755); }
+  if (finderBin) farmLink(farm, finderBin);
+  if (uvxBin) farmLink(farm, uvxBin);
+  else if (process.platform === 'win32') fs.writeFileSync(path.join(farm, 'uvx.cmd'), '@exit /b 0\r\n');
+  else {
+    const uvxStub = path.join(farm, 'uvx');
+    fs.writeFileSync(uvxStub, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(uvxStub, 0o755);
+  }
 
   const r = repo({ 'app/main.py': 'x = 1\n', 'web/app.ts': 'export const a = 1;\n' });
   const res = start(r, { PATH: farm });
@@ -226,21 +251,14 @@ console.log('\nrepo-setup.cjs — an unconfigured repository gets its language s
 // resolver genuinely reports it missing rather than the test merely asserting
 // a mocked answer.
 {
-  const which = (bin) => {
-    for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-      const p = path.join(dir, bin);
-      try { if (fs.statSync(p).isFile()) return p; } catch { /* not in this dir */ }
-    }
-    return null;
-  };
   const finder = process.platform === 'win32' ? 'where' : 'which';
   const gitBin = which('git');
   const finderBin = which(finder);
   const farm = fs.mkdtempSync(path.join(os.tmpdir(), 'nouvx-'));
   trash.push(farm);
-  fs.symlinkSync(gitBin, path.join(farm, 'git'));
-  fs.symlinkSync(process.execPath, path.join(farm, 'node'));
-  fs.symlinkSync(finderBin, path.join(farm, finder));
+  farmLink(farm, gitBin);
+  farmLink(farm, process.execPath);
+  farmLink(farm, finderBin);
 
   const r = repo({ 'app/main.py': 'x = 1\n', 'web/app.ts': 'export const a = 1;\n' });
   const res = start(r, { PATH: farm });
@@ -312,19 +330,15 @@ console.log('\nrepo-setup.cjs — the session is told honestly whether .serena/ 
   check('false: told .serena/ is not gitignored and will show as untracked',
     /\.serena\/ is not gitignored here/.test(context(resPlain)), true);
 
-  // A `git` shim on PATH hands every subcommand but one to the real git --
-  // including `rev-parse --show-toplevel`, which this hook also runs -- and
-  // exits 128 for `check-ignore`: git's status for a fatal error, neither of
-  // check-ignore's answers (0 ignored, 1 not ignored).
-  const realGit = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['git'], { encoding: 'utf8' }).trim().split('\n')[0];
-  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-shim-'));
-  trash.push(shimDir);
-  const shimScript = `#!/bin/sh\nif [ "$1" = "check-ignore" ]; then exit 128; fi\nexec ${JSON.stringify(realGit)} "$@"\n`;
-  fs.writeFileSync(path.join(shimDir, 'git'), shimScript);
-  fs.chmodSync(path.join(shimDir, 'git'), 0o755);
-
+  // git's own fatal exit: `check-ignore` reads the index and dies with 128
+  // (neither of its answers, 0 ignored and 1 not ignored) on a corrupt one,
+  // while `rev-parse --show-toplevel`, which this hook also runs first, never
+  // reads it. A real git failing, rather than a shim on PATH standing in for
+  // one, is what a Windows machine can reproduce too: a PATH lookup there
+  // finds only `git.exe`, so a script shim named `git` would never be run.
   const unknownRoot = repo({ 'app/main.py': 'x = 1\n' });
-  const resUnknown = start(unknownRoot, { ...gitIsolation, PATH: `${shimDir}${path.delimiter}${process.env.PATH}` });
+  fs.writeFileSync(path.join(unknownRoot, '.git', 'index'), 'not an index');
+  const resUnknown = start(unknownRoot, gitIsolation);
   check('null: told it could not be determined, not a confident guess either way',
     /could not be determined/.test(context(resUnknown)), true);
 }
@@ -348,6 +362,21 @@ console.log('\nrepo-setup.cjs — the session is told honestly whether .serena/ 
   const res = start(r);
   check('a repo with no supported language is not configured', fs.existsSync(yml(r)), false);
   check('and the session is told it is not gated', /not gated/i.test(context(res)), true);
+}
+
+// commandOnPath is exported for bin/serena-relay.cjs and documented as taking a
+// bare name or an absolute path. On Windows `where` rejects a drive-letter path
+// as an invalid "path:pattern", so an absolute command must be checked directly
+// rather than handed to it. Called in-process: requiring the file runs nothing.
+console.log('\nrepo-setup.cjs — commandOnPath resolves a bare name and an absolute path');
+{
+  const { commandOnPath } = require(path.join(HOOKS, 'repo-setup.cjs'));
+  check('an absolute path to an existing executable resolves', commandOnPath(process.execPath), true);
+  check('a bare name on PATH resolves', commandOnPath(path.basename(process.execPath, '.exe')), true);
+  check('an absolute path that does not exist does not resolve',
+    commandOnPath(path.join(os.tmpdir(), 'no-such-dir', 'no-such-command')), false);
+  check('a directory is not a command', commandOnPath(os.tmpdir()), false);
+  check('a bare name that is not on PATH does not resolve', commandOnPath('no-such-command-anywhere'), false);
 }
 
 // bin/serena-relay.cjs writes the same configuration for a routed target
@@ -589,11 +618,12 @@ console.log('\nrepo-setup.cjs — a refusal that may be transient keeps the reco
   fs.rmSync(path.join(CONFIG, 'state', 'serena', `${key}.json`), { force: true });
 }
 {
-  // `ps` cannot be started, so the live identity reads as empty. The PATH
-  // holds node alone; the reaper runs before anything else would need more.
+  // `ps` (cscript/powershell on Windows) cannot be started, so the live
+  // identity reads as empty. The PATH holds node alone; the reaper runs
+  // before anything else would need more.
   const farm = fs.mkdtempSync(path.join(os.tmpdir(), 'nops-'));
   trash.push(farm);
-  fs.symlinkSync(process.execPath, path.join(farm, 'node'));
+  farmLink(farm, process.execPath);
   const cwd = repo({}, false);
   const server = fakeServer();
   const key = record(repo({}, false), server, [deadPid()]);

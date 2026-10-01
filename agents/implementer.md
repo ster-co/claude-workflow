@@ -20,11 +20,18 @@ You implement exactly one brief. Not the next one, not the obvious adjacent impr
 1. **Write the failing test first, run it, and confirm it fails for the right reason.** A
    test that has never been red has told you nothing about whether it tests the change.
    Paste the relevant failing lines (not the whole output) into your report.
+   **No separate sabotage pass.** Red before your change and green after is your proof; the
+   reviewer then names one sabotage per test and the orchestrator performs it, once per
+   behavioural brief. This overrides the general "sabotage what it guards, watch it go
+   red, restore" rule for this role only — doing it here as well repeats that step inside
+   every iteration of your loop.
 2. **Implement the smallest thing that makes it pass.**
-3. **While working, run only the tests related to the change** — `jest --findRelatedTests
-   <changed files>`, or pytest on the brief's test paths, or the one suite file the brief
-   names. Save the full suite for the end: run it once, with output to a file, and grep
-   that file — compare against the stated baseline, not against zero failures.
+3. **While working, run only the tests related to the change** — the brief file's House
+   rules `Tests (fast):` line if one is filled in (not `TBD`), otherwise `jest
+   --findRelatedTests <changed files>`, or pytest on the brief's test paths, or the one
+   suite file the brief names. Save the full suite (`Tests (full):`) for the end: run it
+   once, with output to a file, and grep that file — compare against the stated baseline,
+   not against zero failures.
 4. **Do not commit.** The orchestrator owns staging and commits.
 
 **Never defer work the brief asked for.** Finish it, or stop and report `BLOCKED` with the

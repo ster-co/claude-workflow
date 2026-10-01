@@ -56,7 +56,7 @@ lists that marketplace in `allowCrossMarketplaceDependenciesOn` to permit it; a 
 
 The plugin ships Serena's *config* (`.claude-plugin/mcp.json`), not its binary. That config
 starts `bin/serena-relay.cjs` with `node`, and the relay finds or spawns the repository's
-one shared Serena with `uv tool run --from serena-agent serena start-mcp-server`. Each
+one shared Serena with `uv tool run --python 3.13 --from serena-agent serena start-mcp-server`. Each
 repository gets its own shared Serena, one process per repository rather than one per
 session, and the relay routes there: a lookup whose `relative_path` is an absolute path
 into a `/ship` worktree, or into another repository entirely, goes to that repository's own
@@ -170,7 +170,7 @@ including how `/ship` runs the others and how they differ from Claude Code's own
 | command | argument | what it does |
 |---|---|---|
 | **`/ship`** | idea, then nothing | **The front door.** Stops twice — once to choose a direction, once to approve the plan — then briefs, executes and lands unattended. Reads `phase` from its run under `~/.claude/state/ship-runs/`, so running it twice is the whole interface. |
-| `/quick` | yes | The fast lane for a small, obvious ask — answer, brainstorm, bug or change — inline, in this session, no plan, no subagents except `scout`. Do-it-now threshold estimated before editing: ≤3 files, ~30 lines, no design call, a reproducible cause, no shared resource outside this checkout. Crossed mid-change, edits stay uncommitted and get reported; escalates to `/diagnose` or `/ship`. |
+| `/quick` | yes | The fast lane for a small, obvious ask — answer, brainstorm, bug or change — inline, in this session, no plan, no subagents except `scout`. Do-it-now threshold estimated before editing: ≤5 files, ~80 lines of behaviour-bearing code (tests and docs don't count), no gate/permission/auth change at any size, no design call, a reproducible cause, no shared resource outside this checkout. Crossed mid-change, edits stay uncommitted and get reported; escalates to `/diagnose` or `/ship`. |
 | `/blueprint` | yes | Triages into do-it-now / iterate-in-a-browser / really-plan. For the third: explores, puts up 2–3 approaches, **stops** on the direction, writes the plan doc, **stops** again for approval. |
 | `/diagnose` | yes | Refuses to diagnose until environment, one-symptom, and observed-vs-expected are settled. Fixes a simple bug test-first; hands any fix that needs a decision to `/ship`, parked at its direction gate. |
 | `/brainstorm` | yes | Open-ended exploration for "I don't know what I want yet" — puts up 2–3 approaches with trade-offs, recommends one, stops with a recommendation in chat. Never writes a plan document; names `/ship` (build it, on a new branch) or `/blueprint` (plan only) as the next step. `/ship` and `/blueprint` run it for their own brainstorming step. |
@@ -180,6 +180,7 @@ including how `/ship` runs the others and how they differ from Claude Code's own
 | `/execute` | no | The per-brief loop. Six termination conditions. `/ship` calls it. |
 | `/land` | no | Verify, commit, push, open the PR. Asks once whether to `/attack` the branch first — a "no" costs nothing. Never merges to the default branch unprompted. |
 | `/handoff` | no | Writes the next session's opening prompt. For a *deliberate* session end — the checkpoint hooks cover crashes and compaction. |
+| `/subagent-mode` | `fast`, `quality`, or nothing to show | Swaps `reviewer`, `debugger`, `plan-auditor` and `root-cause-auditor` for their `-lite` twins (same prompt and model, effort medium) until switched back. Unattended ship-loop passes always use the full agents. |
 
 `/attack` probes a *standing system*, not a diff — that is what distinguishes it from the
 bundled `code-review` skill (`plugins/synced/<id>/engineering~g2/skills/code-review/SKILL.md`,

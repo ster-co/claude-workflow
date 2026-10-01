@@ -152,8 +152,11 @@ const isReview = (desc) => /\breview/i.test(desc || '');
 // to "implementer": a plugin install namespaces the role, e.g.
 // "workflow-discipline:reviewer" -- accept the bare name or a "<plugin>:"
 // prefix, but a role that merely ends in similar letters with no `:`
-// separator ("evil-reviewer") is not a match.
-const isReviewerRole = (role) => role === 'reviewer' || role.endsWith(':reviewer');
+// separator ("evil-reviewer") is not a match. `reviewer-lite` is the same
+// reviewer at lower effort (agents/reviewer-lite.md, picked by /subagent-mode
+// fast); it is matched by exact name only, never by a looser pattern.
+const REVIEWER_ROLES = ['reviewer', 'reviewer-lite'];
+const isReviewerRole = (role) => REVIEWER_ROLES.some((r) => role === r || role.endsWith(`:${r}`));
 
 const verdictFrom = (text) => {
   if (!text) return 'UNPARSED';

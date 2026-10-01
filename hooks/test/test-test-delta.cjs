@@ -231,6 +231,22 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
   const fakeDir = dir({ 'fake.js': FAKE_RUNNER });
   const fakePath = path.join(fakeDir, 'fake.js');
 
+  // Portable stand-ins for `cat` and `tail -50` (neither exists under cmd.exe):
+  // both exit 0 whatever the upstream program did, which is the property these
+  // scenarios rely on. Like the real `tail`, the tail stand-in treats any
+  // non-flag argument as a FILE to read instead of stdin, so an id blindly
+  // appended after it fails the same way it would with the real thing.
+  fs.writeFileSync(path.join(fakeDir, 'pipe-cat.js'), "process.stdin.pipe(process.stdout);\n");
+  fs.writeFileSync(path.join(fakeDir, 'pipe-tail.js'), [
+    "const fs = require('fs');",
+    "const file = process.argv.slice(2).find((a) => !a.startsWith('-'));",
+    "let text = '';",
+    "try { text = fs.readFileSync(file === undefined ? 0 : file, 'utf8'); } catch (e) { console.error('pipe-tail: ' + e.message); process.exit(0); }",
+    "process.stdout.write(text.split('\\n').slice(-50).join('\\n'));",
+  ].join('\n'));
+  const pipeCat = `node ${JSON.stringify(path.join(fakeDir, 'pipe-cat.js'))}`;
+  const pipeTail = `node ${JSON.stringify(path.join(fakeDir, 'pipe-tail.js'))} -50`;
+
   const BIN = path.join(HOOKS, 'test-delta.cjs');
   const runDelta = (command) => spawnSync('node', [BIN, '--command', command], {
     cwd: REPO, encoding: 'utf-8', env: { ...process.env, CLAUDE_CONFIG_DIR: CONFIG },
@@ -299,7 +315,7 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
     // run, then its automatic re-run) both fail and print the SAME failure
     // line -- but the pipe means first.code and second.code are both 0.
     const statePipe = path.join(fakeDir, 'calls-pipe.txt');
-    const cmdPipe = `node ${JSON.stringify(fakePath)} ${JSON.stringify(statePipe)} 2,3 | cat`;
+    const cmdPipe = `node ${JSON.stringify(fakePath)} ${JSON.stringify(statePipe)} 2,3 | ${pipeCat}`;
     const pp1 = runDelta(cmdPipe);
     check('the piped scenario\'s baseline call exits green', pp1.status, 0);
     const pp2 = runDelta(cmdPipe);
@@ -339,7 +355,7 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
     // not spliced in AND that the whole-command re-run still sees the
     // regression by line reappearance, not by exit code.
     const stateOp = path.join(fakeDir, 'calls-operator.txt');
-    const cmdOp = `node ${JSON.stringify(fakePath)} ${JSON.stringify(stateOp)} 2,3 pytest | tail -50`;
+    const cmdOp = `node ${JSON.stringify(fakePath)} ${JSON.stringify(stateOp)} 2,3 pytest | ${pipeTail}`;
     const o1 = runDelta(cmdOp);
     check('the operator scenario\'s baseline call exits green', o1.status, 0);
     const o2 = runDelta(cmdOp);
@@ -419,6 +435,26 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
     const lastLog = fs.readFileSync(logSpecial, 'utf8').trim().split('\n').pop();
     check('the subset re-run receives the $-and-backtick id literally, not shell-expanded',
       lastLog, JSON.stringify(['pytest', SPECIAL_ID]));
+  }
+
+  console.log('\ntest-delta.cjs --command — node ids are quoted for the shell of the platform they run on');
+  {
+    // Checked with an explicit platform so both branches run everywhere.
+    check('posix: an id is single-quoted', D.quoteNodeId('a::b[1]', 'linux'), "'a::b[1]'");
+    check('posix: an embedded single quote is closed-escaped-reopened',
+      D.quoteNodeId("a'b", 'linux'), `'a'\\''b'`);
+    // cmd.exe has no single quotes: they reach the program verbatim, so
+    // pytest would look for a test literally named `'a::b'`.
+    check('win32: an id is double-quoted', D.quoteNodeId('a::b[1]', 'win32'), '"a::b[1]"');
+    check('win32: cmd metacharacters stay inside the double quotes',
+      D.quoteNodeId('a::b[x&y|z^<>]', 'win32'), '"a::b[x&y|z^<>]"');
+    check('win32: a trailing backslash is doubled so it cannot escape the closing quote',
+      D.quoteNodeId('a\\b\\', 'win32'), '"a\\b\\\\"');
+    // These cannot be made literal inside a cmd.exe double-quoted word, so the
+    // caller must fall back to re-running the whole command.
+    check('win32: an embedded double quote cannot be quoted', D.quoteNodeId('a"b', 'win32'), null);
+    check('win32: a percent sign (cmd variable expansion) cannot be quoted', D.quoteNodeId('a[100%]', 'win32'), null);
+    check('win32: a newline cannot be quoted', D.quoteNodeId('a\nb', 'win32'), null);
   }
 
   console.log('\ntest-delta.cjs --command — a subset re-run that exits neither 0 nor 1 is treated as persisting, not FLAKY');
@@ -520,6 +556,12 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
     const sigkillPath = path.join(fakeDir, 'fake-sigkill.js');
     const stateSigkill = path.join(fakeDir, 'calls-sigkill.txt');
     const cmdSigkill = `node ${JSON.stringify(sigkillPath)} ${JSON.stringify(stateSigkill)} pytest`;
+    if (process.platform === 'win32') {
+      // Windows has no POSIX signals: process.kill(pid, 'SIGKILL') is a plain
+      // TerminateProcess that surfaces to the parent as ordinary exit code 1,
+      // never as a signal, so there is no signal-killed child to construct.
+      console.log('  skip (Windows has no signal delivery; a self-killed child reads as exit 1)');
+    } else {
     const k1 = runDelta(cmdSigkill);
     check('the sigkill scenario\'s baseline call exits green', k1.status, 0);
     const k2 = runDelta(cmdSigkill);
@@ -527,6 +569,7 @@ console.log('\ntest-delta.cjs --command — end to end against a throwaway repo'
       /NEWLY FAILING/.test(k2.stdout), true);
     check('it must NOT be reported FLAKY', /FLAKY/.test(k2.stdout), false);
     check('and it exits non-zero (blocking)', k2.status === 0, false);
+    }
   }
 
   console.log('\ntest-delta.cjs --command — a missing value errors instead of running the next flag as the shell command');

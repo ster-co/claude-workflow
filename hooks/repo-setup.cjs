@@ -129,10 +129,22 @@ function detectServers(root) {
 }
 
 // Whether `cmd` resolves to something runnable: a bare name found on PATH, or
-// an absolute path that exists and is executable — `where`/`which` answers
-// both the same way. Node has no built-in for this. A missing binary must be
-// caught, not thrown, and the check must not be able to hang a SessionStart.
+// an absolute path that exists and is executable. Node has no built-in for
+// this. A missing binary must be caught, not thrown, and the check must not be
+// able to hang a SessionStart.
+//
+// An absolute path is checked directly and never handed to `where`: on
+// Windows `where C:\...\node.exe` fails with `Invalid pattern is specified in
+// "path:pattern"`, so every absolute command would read as not on PATH.
 function commandOnPath(cmd) {
+  if (path.isAbsolute(cmd)) {
+    try {
+      fs.accessSync(cmd, fs.constants.X_OK);
+      return fs.statSync(cmd).isFile();
+    } catch {
+      return false;
+    }
+  }
   const finder = process.platform === 'win32' ? 'where' : 'which';
   try {
     execFileSync(finder, [cmd], { stdio: 'ignore', timeout: 5000 });

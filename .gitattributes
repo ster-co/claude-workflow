@@ -1,0 +1,5 @@
+# Every text file is checked out with LF line endings, on every platform.
+# Git for Windows installs with core.autocrlf=true, which otherwise converts this
+# repository -- and the plugin copy Claude Code clones from it -- to CRLF, and the
+# hooks and checks that read these files split lines on "\n".
+* text=auto eol=lf

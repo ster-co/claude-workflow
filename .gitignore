@@ -6,6 +6,7 @@
 /*
 
 !/.gitignore
+!/.gitattributes
 !/README.md
 !/SETUP.md
 !/CLAUDE.md

@@ -390,7 +390,13 @@ class Target {
     // the command line it was spawned with, so the identity captured at spawn
     // is the one killRecordServer will see (recaptureIdentity covers any other
     // exec, but only from the moment the server answers).
-    const argv = ['uv', 'tool', 'run', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code',
+    //
+    // The Python is pinned. Unpinned, uv picks the newest Python it manages,
+    // and serena-agent's pyyaml publishes Windows wheels only up to cp313: on
+    // a newer Python uv compiles pyyaml from source, which needs MSVC, so on a
+    // stock Windows machine Serena never starts. 3.13 has wheels everywhere
+    // this runs (on Windows ARM64, uv's x86_64 build runs under emulation).
+    const argv = ['uv', 'tool', 'run', '--python', '3.13', '--from', 'serena-agent', 'serena', 'start-mcp-server', '--context', 'claude-code',
       '--transport', 'streamable-http', '--port', String(port), '--open-web-dashboard', 'False'];
     if (hasProjectMarker(this.root)) argv.push('--project', this.root);
     return argv;

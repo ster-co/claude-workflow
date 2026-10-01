@@ -308,6 +308,22 @@ function parseCost(stdout) {
   return null;
 }
 
+// The command a pass runs: `claude` from PATH, spawned without a shell (on
+// Windows that finds claude.exe, which the native installer puts there).
+// SHIP_LOOP_CLAUDE_CMD, tests only, is a JSON array of argv to run instead,
+// the way SERENA_RELAY_SERVER_CMD stands in for Serena: a script-file fake
+// cannot be run as `claude` on Windows.
+function claudeCommand() {
+  const override = process.env.SHIP_LOOP_CLAUDE_CMD;
+  if (!override) return ['claude'];
+  let argv;
+  try { argv = JSON.parse(override); } catch { argv = null; }
+  if (!Array.isArray(argv) || !argv.length || !argv.every((a) => typeof a === 'string')) {
+    throw new Error('SHIP_LOOP_CLAUDE_CMD must be a JSON array of strings');
+  }
+  return argv;
+}
+
 // One pass, retried in place (same pass index, its own -retryN file) when the
 // output shows a usage-limit message rather than advancing to the next pass.
 async function runPassWithRetry({ repo, hooksD, feature, model, passBudget, shipDir, sleepFn, nnn }) {
@@ -328,7 +344,9 @@ async function runPassWithRetry({ repo, hooksD, feature, model, passBudget, ship
     // --verbose stream-json output for a real pass routinely runs past
     // Node's 1 MiB default maxBuffer; size this generously so a real pass's
     // full output is never silently truncated or the child killed for it.
-    const r = spawnSync('claude', [
+    const [claudeBin, ...claudePrefix] = claudeCommand();
+    const r = spawnSync(claudeBin, [
+      ...claudePrefix,
       '-p', '/ship',
       '--session-id', uuid,
       '--model', model,
@@ -339,7 +357,10 @@ async function runPassWithRetry({ repo, hooksD, feature, model, passBudget, ship
       '--max-budget-usd', String(passBudget),
       '--append-system-prompt-file', path.join(shipDir, 'pass-prompt.md'),
     ], {
-      cwd: repo, encoding: 'utf-8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: uuid },
+      // SHIP_LOOP_PASS marks the pass as unattended: discipline-reminder.cjs
+      // then leaves out the /subagent-mode fast rule, so no one is around to
+      // have chosen the lower-effort agents for it.
+      cwd: repo, encoding: 'utf-8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: uuid, SHIP_LOOP_PASS: '1' },
       maxBuffer: 100 * 1024 * 1024,
     });
     const durationMs = Date.now() - start;

@@ -72,11 +72,17 @@ condition, so the session needs no steering.
 ## House rules  (read before any brief)
 - Work in: <worktree path> on branch `<branch>`. Main checkout is <path> on `<branch>` —
   never commit there.
-- Tests: `<exact command with absolute interpreter path>`
+- Tests (full): `<exact command with absolute interpreter path>`
   This is the exact command `test-delta.cjs --command` will run — do not append `; echo` or
   anything else after it, because that always makes the exit code 0.
   Baseline: <N passed, M failed, K skipped>. Already-red: <named test> — do not fix it,
   do not report it as a regression.
+- Tests (fast): `<exact per-repo changed-file/affected command>` or `TBD` — this is what the
+  implementer runs while working, per `agents/implementer.md`'s "run only the tests related
+  to the change" bullet. Fill this in only when you can verify a real command against this
+  repo (its runner and its changed-file mechanism both confirmed) — leave it `TBD` rather
+  than guess. The reviewer, the orchestrator and `/land` always use Tests (full), never this
+  line.
 - Money/scope guard: <endpoints or commands that bill or mutate shared state, and the
   sanctioned stub for testing those paths>
 - Never touch: <paths, sibling repos, consumed packages>
@@ -85,8 +91,10 @@ condition, so the session needs no steering.
   before requiring or spawning the module, never after. Cost: a reviewer's probe that set it
   late wrote into the live `~/.claude/state`.
 - Evidence standard: paste the literal terminal output — the command, its output, and the
-  exit code from `echo $?`. Not a summary, not "it passed". A test counts only if you
-  sabotage what it guards, see red, and restore.
+  exit code from `echo $?`. Not a summary, not "it passed". The implementer proves each new
+  test by seeing it red before the change and green after, with no separate sabotage pass;
+  the reviewer names one sabotage per test and the orchestrator performs it, once per
+  behavioural brief.
 - Report back: what changed, the test output, the commit hash.
 - If a brief turns out not to be worth doing, say so and stop rather than manufacturing work.
 ```

@@ -178,6 +178,19 @@ clearMarkers();
 record({ tool_input: { subagent_type: 'x:plan-auditor-2', description: 'Audit' } });
 check('"x:plan-auditor-2" is not a namespaced match (PostToolUse)', fs.existsSync(markerFor(PLAN)), false);
 
+// `plan-auditor-lite` (the same auditor at lower effort, picked by
+// /subagent-mode fast) must clear the gate, bare or namespaced; look-alikes must not.
+for (const role of ['plan-auditor-lite', 'workflow-discipline:plan-auditor-lite']) {
+  clearMarkers();
+  record({ tool_input: { subagent_type: role, description: 'Audit' } });
+  check(`a "${role}" records (PostToolUse)`, fs.existsSync(markerFor(PLAN)), true);
+}
+for (const role of ['evil-plan-auditor-lite', 'plan-auditor-lite-x']) {
+  clearMarkers();
+  record({ tool_input: { subagent_type: role, description: 'Audit' } });
+  check(`"${role}" is not a match (PostToolUse)`, fs.existsSync(markerFor(PLAN)), false);
+}
+
 clearMarkers();
 record({ tool_response: '## Audit Verdict\nCLEAN\n' });   // no Plan: line
 check('a verdict naming no plan records nothing', fs.existsSync(markerFor(PLAN)), false);
@@ -304,6 +317,10 @@ check('without the hatch it still denies', skipped, 'deny');
 console.log('\nplan-gate.cjs — resolves the directory the git command runs in, not the session cwd');
 
 const REPO_B = fs.mkdtempSync(path.join(os.tmpdir(), 'planrepob-'));
+// A path as a shell command should spell it: forward slashes, which Git Bash
+// and PowerShell both read as a path. An unquoted `C:\Users\...` is escapes to
+// bash, so on Windows the raw path would test the tokenizer, not the gate.
+const shp = (p) => p.split(path.sep).join('/');
 const gitB = (...args) => execFileSync('git', args, { cwd: REPO_B, encoding: 'utf8' });
 gitB('init', '-q', '.');
 gitB('config', 'user.email', 't@t');
@@ -323,7 +340,7 @@ clearMarkers();
 git('reset', '-q'); gitB('reset', '-q');
 stageOnly(PLAN); // staged in A (the session dir), nothing staged in B
 check('a plan staged in the session dir does not block a commit that cds into a clean repo',
-  commitFromA(`cd ${REPO_B} && git commit -m x`), 'allow');
+  commitFromA(`cd ${shp(REPO_B)} && git commit -m x`), 'allow');
 
 clearMarkers();
 git('reset', '-q');
@@ -335,7 +352,7 @@ clearMarkers();
 git('reset', '-q'); gitB('reset', '-q');
 stageOnly(PLAN);
 check('the same with `git -C`, nothing staged in B: allowed',
-  commitFromA(`git -C ${REPO_B} commit -m x`), 'allow');
+  commitFromA(`git -C ${shp(REPO_B)} commit -m x`), 'allow');
 
 clearMarkers();
 git('reset', '-q');
@@ -575,7 +592,7 @@ clearMarkers();
 git('reset', '-q'); gitB('reset', '-q');
 stageOnly(PLAN);
 check('cd B && git commit (a certain chain) still checks only B, not the session dir',
-  commitFromA(`cd ${REPO_B} && git commit -m x`), 'allow');
+  commitFromA(`cd ${shp(REPO_B)} && git commit -m x`), 'allow');
 
 // Brief 2 follow-up: isSimpleCommand used to reject ANY `'` or `"` at all, so
 // an ordinary `cd B && git commit -m "msg"` never took the trusted-chain fast
@@ -589,13 +606,13 @@ clearMarkers();
 git('reset', '-q'); gitB('reset', '-q');
 stageOnly(PLAN);
 check('cd B && git commit -m "quoted message" reaches only B, plan staged only in A: allowed',
-  commitFromA(`cd ${REPO_B} && git commit -m "fix: quoted message"`), 'allow');
+  commitFromA(`cd ${shp(REPO_B)} && git commit -m "fix: quoted message"`), 'allow');
 
 clearMarkers();
 git('reset', '-q'); gitB('reset', '-q');
 stageOnly(PLAN);
 check("git -C B commit -m 'quoted message' reaches only B, plan staged only in A: allowed",
-  commitFromA(`git -C ${REPO_B} commit -m 'x y'`), 'allow');
+  commitFromA(`git -C ${shp(REPO_B)} commit -m 'x y'`), 'allow');
 
 // A second `git` word anywhere in the command, even once safe quoted spans
 // are stripped away, still means there is more than one invocation for the
@@ -989,6 +1006,19 @@ writeTranscript([handback(footer('CLEAN', 'none', 'none'))]);
 stop({ agent_type: 'x:plan-auditor-2' });
 check('"x:plan-auditor-2" is not a namespaced match (SubagentStop)', fs.existsSync(markerFor(PLAN)), false);
 
+for (const role of ['plan-auditor-lite', 'workflow-discipline:plan-auditor-lite']) {
+  clearMarkers();
+  writeTranscript([handback(footer('CLEAN', 'none', 'none'))]);
+  stop({ agent_type: role });
+  check(`a "${role}" records (SubagentStop)`, markerJSON(PLAN)?.verdict, 'CLEAN');
+}
+for (const role of ['evil-plan-auditor-lite', 'plan-auditor-lite-x']) {
+  clearMarkers();
+  writeTranscript([handback(footer('CLEAN', 'none', 'none'))]);
+  stop({ agent_type: role });
+  check(`"${role}" is not a match (SubagentStop)`, fs.existsSync(markerFor(PLAN)), false);
+}
+
 // The live receipt carries the DISPATCH PROMPT as a sibling field. A prompt is
 // attacker-shaped text -- it is whatever was asked for -- so a recorder that
 // reached into it would let "audit this, and here is a CLEAN footer" clear the
@@ -1287,7 +1317,7 @@ console.log('\nplan-gate.cjs — BRIEF 12(c): cd U&&git commit (no spaces) token
   git('reset', '-q');
   stageOnly(PLAN); // unaudited plan staged only in the session dir (REPO)
   check('cd U&&git commit (no spaces), plan staged only in the session dir, nothing in U: the certain chain drops the session dir and allows',
-    commitFromA(`cd ${REPO_ND}&&git commit -m x`), 'allow');
+    commitFromA(`cd ${shp(REPO_ND)}&&git commit -m x`), 'allow');
 
   // MUST NOT: a plan staged in U itself is still seen, so the no-space form
   // is not silently more permissive than the spaced one.
@@ -1562,7 +1592,8 @@ console.log('\nplan-gate.cjs — a merge commit may carry plans unchanged from t
   // a path this checkout never had); the run branch diverges on its own file.
   g('checkout', '-q', '-b', 'develop');
   fs.mkdirSync(path.join(M, 'docs', 'plans'), { recursive: true });
-  const incoming = path.join('docs', 'plans', '2026-09-27-incoming.md');
+  // Git's own form: it goes into `MERGE_HEAD:<path>` and into shell commands.
+  const incoming = 'docs/plans/2026-09-27-incoming.md';
   fs.writeFileSync(path.join(M, incoming), '# incoming\n');
   g('add', incoming);
   g('commit', '-q', '-m', 'plan landed on develop');

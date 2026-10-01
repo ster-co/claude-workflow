@@ -38,6 +38,28 @@ function run(script, input, env = {}) {
   return { out, stderr: r.stderr, code: r.status };
 }
 
+// Starts every job at once and blocks until all have exited. `spawnSync` on
+// this process would serialise them end-to-end and never exercise a race, so
+// a separate node driver spawns them asynchronously and this process waits on
+// the driver. A node driver rather than `sh -c '... &\nwait'`: Windows has no
+// `sh` on PATH, and there the shell form ran nothing at all. Each job is
+// `{ script, stdin? }` -- a node script path and an optional file to feed it.
+const CONCURRENT_DRIVER = `
+  const { spawn } = require('child_process');
+  const fs = require('fs');
+  const jobs = JSON.parse(process.argv[1]);
+  for (const j of jobs) {
+    const stdin = j.stdin ? fs.openSync(j.stdin, 'r') : 'ignore';
+    spawn(process.execPath, [j.script], { stdio: [stdin, 'ignore', 'inherit'] });
+  }
+`;
+function concurrently(jobs, env) {
+  spawnSync(process.execPath, ['-e', CONCURRENT_DRIVER, JSON.stringify(jobs)], {
+    env: { ...process.env, CLAUDE_CONFIG_DIR: CONFIG, SKIP_CODE_GATES: '', ...env },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+}
+
 function check(name, actual, expected) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
   if (a === e) { pass++; console.log(`  ok   ${name}`); }
@@ -210,6 +232,11 @@ clean();
 console.log('\nverify-gate.cjs — a stale verdict from a previous arming does not clear a new one');
 clean();
 write(armFile, { brief: '1', at: new Date().toISOString() });
+// The arming's mtime is forced earlier than the verdict: on Windows the
+// filesystem's clock can stamp the arm file a few ms past the `Date.now()` the
+// verdict is written with, and the verdict would read as older than its arming.
+const past = new Date(Date.now() - 60000);
+fs.utimesSync(armFile, past, past);
 write(reviewFile, { brief: '1', verdict: 'APPROVED', at: new Date().toISOString() });
 check('brief 1 approved under the first arming: allows',
   blocked(run('verify-gate.cjs', stop())), false);
@@ -384,6 +411,30 @@ run('verify-record.cjs', {
 });
 check('"evil-reviewer" subagent_type does not record', fs.existsSync(reviewFile), false);
 
+// MUST: `reviewer-lite` (the same reviewer at lower effort, picked by
+// /subagent-mode fast) is a reviewer, bare or plugin-namespaced. Without this,
+// a fast-mode review is never recorded and verify-gate blocks the turn.
+for (const role of ['reviewer-lite', 'workflow-discipline:reviewer-lite']) {
+  clean();
+  run('verify-record.cjs', {
+    hook_event_name: 'PostToolUse', session_id: SID,
+    tool_input: { subagent_type: role, prompt: 'Review BRIEF 4\n\nChecked it.' },
+    tool_response: { content: '## Review Verdict\nAPPROVED\n' },
+  });
+  check(`a "${role}" subagent_type records`, readReviewOf(reviewFile)?.verdict, 'APPROVED');
+}
+
+// MUST NOT: look-alikes of the lite name stay unmatched, exactly as for the base name.
+for (const role of ['evil-reviewer-lite', 'reviewer-lite-x']) {
+  clean();
+  run('verify-record.cjs', {
+    hook_event_name: 'PostToolUse', session_id: SID,
+    tool_input: { subagent_type: role, prompt: 'Review BRIEF 4\n\nChecked it.' },
+    tool_response: { content: '## Review Verdict\nAPPROVED\n' },
+  });
+  check(`"${role}" subagent_type does not record`, fs.existsSync(reviewFile), false);
+}
+
 // MUST: with NO subagent_type at all, the old description/prompt fallback
 // still applies -- a payload that predates the field, or a harness that omits
 // it, must not silently stop recording real reviews.
@@ -401,13 +452,9 @@ clean();
 // BRIEF 18 (H3): the read-modify-write of the review file must be serialised
 // with a lock, the same pattern run-state.cjs uses, or concurrent recordings
 // splice into a corrupt file and lose verdicts (measured 10/10 with no lock).
-// `spawnSync` on THIS process would serialise the three calls end-to-end and
-// never exercise the race; a shell one-liner that backgrounds all three `node
-// verify-record.cjs` invocations and then `wait`s is what actually starts them
-// concurrently and blocks (via the shell, not this process's event loop) until
-// every one has exited. Each gets its input on stdin from a scratch file,
-// since a backgrounded `<<<` heredoc line does not reliably keep three
-// separate stdins apart across shells.
+// `concurrently` starts all three `verify-record.cjs` invocations at once and
+// blocks until every one has exited. Each gets its input on stdin from its own
+// scratch file.
 console.log('\nverify-record.cjs — concurrent recordings under load keep every verdict (H3)');
 {
   const briefs = ['20', '21', '22'];
@@ -421,16 +468,12 @@ console.log('\nverify-record.cjs — concurrent recordings under load keep every
     }));
     return f;
   });
-  const shCmd = inputFiles
-    .map((f) => `node ${JSON.stringify(path.join(HOOKS, 'verify-record.cjs'))} < ${JSON.stringify(f)} &`)
-    .join('\n') + '\nwait\n';
+  const jobs = inputFiles.map((f) => ({ script: path.join(HOOKS, 'verify-record.cjs'), stdin: f }));
 
   let allKept = true;
   for (let iter = 0; iter < 10; iter++) {
     clean();
-    spawnSync('sh', ['-c', shCmd], {
-      env: { ...process.env, CLAUDE_CONFIG_DIR: CONFIG, SKIP_CODE_GATES: '' },
-    });
+    concurrently(jobs);
     let rec = null;
     try { rec = JSON.parse(fs.readFileSync(reviewFile, 'utf-8')); } catch {}
     const kept = briefs.every((n) => rec?.verdicts?.[n]?.verdict === 'APPROVED');
@@ -497,6 +540,18 @@ check('"evil-reviewer" is not a namespaced match', fs.existsSync(reviewFile), fa
 clean();
 subagentStop({ agent_type: 'reviewer-helper' });
 check('"reviewer-helper" is not a namespaced match', fs.existsSync(reviewFile), false);
+
+// The lite reviewer on the SubagentStop branch, same rules as PostToolUse.
+for (const role of ['reviewer-lite', 'workflow-discipline:reviewer-lite']) {
+  clean();
+  subagentStop({ agent_type: role });
+  check(`a "${role}" finishing records (SubagentStop)`, readReview()?.verdict, 'APPROVED');
+}
+for (const role of ['evil-reviewer-lite', 'reviewer-lite-x']) {
+  clean();
+  subagentStop({ agent_type: role });
+  check(`"${role}" is not a match (SubagentStop)`, fs.existsSync(reviewFile), false);
+}
 
 clean();
 subagentStop({ agent_type: 'x:reviewer-2' });
@@ -762,11 +817,10 @@ clean();
 // lock in between (e.g. a mistaken manual `rm` followed by a second
 // recorder). VERIFY_RECORD_TEST_RMW_DELAY_MS widens the window between
 // acquiring the lock and releasing it, the same test-only hook run-state.cjs's
-// `save()` uses, so a second, truly concurrent process (backgrounded via the
-// shell, same `sh -c '... &\nwait\n'` shape as the H3 race above -- a
-// spawnSync on this process alone would serialise the two and never
-// overlap) can swap the token underneath the recorder while it still holds
-// the lock, deterministically rather than racing scheduling luck.
+// `save()` uses, so a second, truly concurrent process (started by
+// `concurrently`, as in the H3 race above) can swap the token underneath the
+// recorder while it still holds the lock, deterministically rather than
+// racing scheduling luck.
 console.log('\nverify-record.cjs — release never deletes a lock whose token is not its own');
 clean();
 {
@@ -782,24 +836,20 @@ clean();
   fs.writeFileSync(swapFile, `
     const fs = require('fs');
     const lockPath = ${JSON.stringify(lockPath)};
-    const deadline = Date.now() + 2000;
-    while (!fs.existsSync(lockPath) && Date.now() < deadline) {}
-    if (fs.existsSync(lockPath)) {
+    // Waits for the recorder's own token, not just the file: the lock exists
+    // from the open, a moment before the recorder writes its token into it,
+    // and a swap in that moment is overwritten by the recorder's own write.
+    const holdsToken = () => { try { return !!JSON.parse(fs.readFileSync(lockPath, 'utf8')).token; } catch { return false; } };
+    const deadline = Date.now() + 10000;
+    while (!holdsToken() && Date.now() < deadline) {}
+    if (holdsToken()) {
       fs.writeFileSync(lockPath, JSON.stringify({ pid: 999998, token: ${JSON.stringify(foreignToken)}, at: new Date().toISOString() }));
     }
   `);
-  const shCmd = [
-    `node ${JSON.stringify(path.join(HOOKS, 'verify-record.cjs'))} < ${JSON.stringify(inputFile)} &`,
-    `RECPID=$!`,
-    `node ${JSON.stringify(swapFile)} &`,
-    `SWAPPID=$!`,
-    `wait $RECPID`,
-    `wait $SWAPPID`,
-    '',
-  ].join('\n');
-  spawnSync('sh', ['-c', shCmd], {
-    env: { ...process.env, CLAUDE_CONFIG_DIR: CONFIG, SKIP_CODE_GATES: '', VERIFY_RECORD_TEST_RMW_DELAY_MS: '400' },
-  });
+  concurrently([
+    { script: path.join(HOOKS, 'verify-record.cjs'), stdin: inputFile },
+    { script: swapFile },
+  ], { VERIFY_RECORD_TEST_RMW_DELAY_MS: '400' });
   const lockAfter = (() => { try { return JSON.parse(fs.readFileSync(lockPath, 'utf-8')); } catch { return null; } })();
   check('release leaves a lock whose token it does not own untouched',
     lockAfter && lockAfter.token, foreignToken);

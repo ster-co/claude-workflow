@@ -276,10 +276,10 @@ function isCleanLit(raw) {
  * `'...'` of any content is trusted unconditionally: POSIX single quotes
  * admit no escaping at all, so a balanced pair can only ever hold literal
  * text -- the same fact `stripSafeQuotes` below relies on for a
- * single-quoted span. `"..."` is trusted only when its content has none of
- * `$`, backtick or `\`, the three characters with any special meaning inside
- * double quotes (a substitution or an escape could otherwise be hiding in
- * it).
+ * single-quoted span. `"..."` is trusted only when its content has no `$`
+ * or backtick (a substitution could be hiding in it) and no `\` that escapes
+ * anything (one followed by $ ` " \ or a newline); a backslash before any
+ * other character is literal text, as in a Windows path.
  *
  * `raw` must be a token straight out of `gitDirTokens`, which keeps quote
  * characters IN the token rather than stripping them. Checking `raw[0]` and
@@ -303,7 +303,12 @@ function quotedLitValue(raw) {
   if ((q !== "'" && q !== '"') || raw[raw.length - 1] !== q) return null;
   const inner = raw.slice(1, -1);
   if (inner.includes(q)) return null;
-  if (q === '"' && /[$`\\]/.test(inner)) return null;
+  // Inside double quotes `$` and backtick can substitute, and `\` escapes only
+  // when followed by $ ` " \ or a newline. A `\` before anything else is
+  // literal text, in bash and PowerShell alike -- which is every backslash in a
+  // Windows path (`"C:\repo"`). Refusing those dropped the directory from the
+  // candidate set, so a gated repo named that way went unchecked.
+  if (q === '"' && (/[$`]/.test(inner) || /\\([$`"\\\n]|$)/.test(inner))) return null;
   return inner;
 }
 

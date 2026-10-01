@@ -96,8 +96,19 @@ function mkReadyRun(phase, { branch = 'feature/x', checkoutBranch = branch, clau
   const env = { ...process.env, CLAUDE_CONFIG_DIR: cfgDir };
   spawnSync('git', ['checkout', '-q', '-b', checkoutBranch], { cwd: repo });
   spawnSync('node', [RUN_STATE, 'start', '--feature', feature, '--phase', phase], { cwd: repo, env });
-  spawnSync('node', [RUN_STATE, 'branch', branch], { cwd: repo, env });
-  if (claudeMd !== null) fs.writeFileSync(path.join(repo, 'CLAUDE.md'), claudeMd);
+  // `--feature` names the run outright. Without it run-state resolves the run
+  // through the calling session's pointer, which exists only when this suite
+  // itself runs inside a Claude session (CLAUDE_CODE_SESSION_ID); from a plain
+  // shell the branch landed on a run called `unnamed`.
+  spawnSync('node', [RUN_STATE, 'branch', branch, '--feature', feature], { cwd: repo, env });
+  // Committed, as a project's CLAUDE.md is: left untracked it dirties the tree
+  // and the clean-tree check refuses first, unless the machine's own global
+  // gitignore happens to hide it.
+  if (claudeMd !== null) {
+    fs.writeFileSync(path.join(repo, 'CLAUDE.md'), claudeMd);
+    spawnSync('git', ['add', '-f', 'CLAUDE.md'], { cwd: repo });
+    spawnSync('git', ['commit', '-q', '-m', 'CLAUDE.md'], { cwd: repo });
+  }
   return { repo, feature, cfgDir };
 }
 

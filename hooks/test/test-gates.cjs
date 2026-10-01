@@ -110,6 +110,11 @@ fs.writeFileSync(path.join(REPO, 'notes.md'), 'x\n');
 
 // A repo with no Serena config at all: the gates must be invisible there.
 const PLAIN = fs.mkdtempSync(path.join(os.tmpdir(), 'gateplain-'));
+
+// A path as a shell command should spell it: forward slashes, which Git Bash
+// and PowerShell both read as a path. An unquoted `C:\Users\...` is escapes to
+// bash, so on Windows the raw path would test the tokenizer, not the gate.
+const shp = (p) => p.split(path.sep).join('/');
 fs.writeFileSync(path.join(PLAIN, 'a.py'), '# x\n');
 
 // A gated repo with a real .git, plus a worktree of it. The worktree has no
@@ -495,6 +500,19 @@ check('a commit in an ungated repo is allowed',
 // directory, `git -C "<REPO>" commit` still checks REPO's unread diff.
 check('a quoted -C naming a gated repo is still checked',
   decision(run('gates/commit-gate.cjs', pre('Bash', { command: `git -C "${REPO}" commit -m x` }, SID, PLAIN))), 'deny');
+// ...including when the path holds a backslash, as every Windows path does. In
+// double quotes a `\` not followed by $ ` " \ or a newline is literal text in
+// bash and PowerShell alike, so `"C:\repo"` names C:\repo. Refusing it dropped
+// the gated repo from the candidates and let the commit through unchecked. On
+// POSIX a directory name may itself hold a backslash, which reproduces it here.
+if (process.platform !== 'win32') {
+  const bsRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'gate\\bs-'));
+  fs.mkdirSync(path.join(bsRepo, '.serena'));
+  fs.writeFileSync(path.join(bsRepo, '.serena', 'project.yml'), 'project_name: "gatebs"\n');
+  check('a quoted -C whose path holds a literal backslash is still checked',
+    decision(run('gates/commit-gate.cjs', pre('Bash', { command: `git -C "${bsRepo}" commit -m x` }, SID, PLAIN))), 'deny');
+  fs.rmSync(bsRepo, { recursive: true, force: true });
+}
 // The words inside a message or a document are not an invocation.
 check('the words "git commit" inside a quoted string are allowed',
   commit(`echo "remember to git commit -m x" >> ${REPO}/notes.md`), 'allow');
@@ -856,10 +874,10 @@ check('a genuine `cd LIT && git commit` chain to an ungated dir is still allowed
 console.log('\ncommit-gate.cjs — a quoted commit message does not block the strict cd/-C grammar');
 rm(diffMarker);
 check('cd U && git commit -m "quoted message" reaches only the ungated dir: no diff needed',
-  commit(`cd ${GS2} && git commit -m "fix: quoted message"`), 'allow');
+  commit(`cd ${shp(GS2)} && git commit -m "fix: quoted message"`), 'allow');
 rm(diffMarker);
 check("git -C U commit -m 'quoted message' reaches only the ungated dir: no diff needed",
-  commit(`git -C ${GS2} commit -m 'x y'`), 'allow');
+  commit(`git -C ${shp(GS2)} commit -m 'x y'`), 'allow');
 rm(diffMarker);
 check('two git words -- one quoted-inert, one real -- still checks the session dir',
   commit(`cd ${GS2} && git commit -m "a" ; cd ${GS2} && git commit`), 'deny');
@@ -1086,10 +1104,17 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
   fs.mkdirSync(path.join(BACKTICK_DIR, '.serena'), { recursive: true });
   fs.writeFileSync(path.join(BACKTICK_DIR, '.serena', 'project.yml'), 'project_name: "backticky"\n');
   fs.writeFileSync(path.join(BACKTICK_DIR, 'y.py'), '# x\n');
+  // Windows reserves `"` in a file name and reads `\` as a separator, so the
+  // two fixtures below exist only on POSIX; their checks are skipped on win32.
+  // The Windows form of the backslash case is every quoted `C:\...` temp path
+  // the checks above already use.
+  const POSIX_NAMES = process.platform !== 'win32';
   const BACKSLASH_DIR = path.join(A, '\\Z');
-  fs.mkdirSync(path.join(BACKSLASH_DIR, '.serena'), { recursive: true });
-  fs.writeFileSync(path.join(BACKSLASH_DIR, '.serena', 'project.yml'), 'project_name: "backslashz"\n');
-  fs.writeFileSync(path.join(BACKSLASH_DIR, 'y.py'), '# x\n');
+  if (POSIX_NAMES) {
+    fs.mkdirSync(path.join(BACKSLASH_DIR, '.serena'), { recursive: true });
+    fs.writeFileSync(path.join(BACKSLASH_DIR, '.serena', 'project.yml'), 'project_name: "backslashz"\n');
+    fs.writeFileSync(path.join(BACKSLASH_DIR, 'y.py'), '# x\n');
+  }
   // A directory literally named `a'b'c`/`a"b"c`: what quotedLitValue's inner
   // text would be, unquoted, for the raw token `'a'b'c'`/`"a"b"c"` -- three
   // quoted fragments the shell concatenates into `abc`, not one literal span
@@ -1104,9 +1129,11 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
   fs.writeFileSync(path.join(EMBEDQUOTE_SINGLE_DIR, '.serena', 'project.yml'), 'project_name: "embedquotesingle"\n');
   fs.writeFileSync(path.join(EMBEDQUOTE_SINGLE_DIR, 'y.py'), '# x\n');
   const EMBEDQUOTE_DOUBLE_DIR = path.join(A, 'a"b"c');
-  fs.mkdirSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena'), { recursive: true });
-  fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena', 'project.yml'), 'project_name: "embedquotedouble"\n');
-  fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, 'y.py'), '# x\n');
+  if (POSIX_NAMES) {
+    fs.mkdirSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena'), { recursive: true });
+    fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, '.serena', 'project.yml'), 'project_name: "embedquotedouble"\n');
+    fs.writeFileSync(path.join(EMBEDQUOTE_DOUBLE_DIR, 'y.py'), '# x\n');
+  }
   // A directory literally named `it's`: a DOUBLE-quoted `cd` argument whose
   // inner text holds a single quote is still one whole span -- quotedLitValue
   // only refuses an inner quote matching its OWN delimiter (`"`), never the
@@ -1382,13 +1409,16 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
       bash(`cd "${B}" && sed -i 's/x/y/' b.py`, sid, B), 'allow');
   }
   {
-    // A double-quoted literal that DOES contain `$`, a backtick or `\` is
-    // refused by quotedLitValue itself, so it adds no candidate, the same as
-    // the unquoted `$X` that isCleanLit refuses. Each of the three points at
+    // A double-quoted literal that contains `$` or a backtick is refused by
+    // quotedLitValue itself, so it adds no candidate, the same as the unquoted
+    // `$X` that isCleanLit refuses. A `\` before an ordinary character is
+    // different: inside double quotes it is literal text, so `cd "\Z"` really
+    // does enter the directory named `\Z`, and that directory IS a candidate
+    // (the same rule that makes `"C:\repo"` name C:\repo). Each case points at
     // a real, gated, unopened directory (DOLLAR_DIR/BACKTICK_DIR/BACKSLASH_DIR,
     // created above) whose name is exactly the quoted argument's inner text
-    // once unquoted -- without a real directory of that exact name, removing
-    // quotedLitValue's refusal would change nothing, since isRealDir would
+    // once unquoted -- without a real directory of that exact name, the
+    // outcome would not depend on quotedLitValue at all, since isRealDir would
     // filter the literal string out regardless.
     const sid = freshSid();
     lookup(sid, 'src/a.py');
@@ -1398,10 +1428,12 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
     lookup(sid2, 'src/a.py');
     check('a double-quoted `cd` argument containing a backtick still adds no candidate',
       bash(`cd "\`Y" && sed -i 's/x/y/' y.py`, sid2, A), 'allow');
-    const sid3 = freshSid();
-    lookup(sid3, 'src/a.py');
-    check('a double-quoted `cd` argument containing `\\` still adds no candidate',
-      bash(`cd "\\Z" && sed -i 's/x/y/' y.py`, sid3, A), 'allow');
+    if (POSIX_NAMES) {
+      const sid3 = freshSid();
+      lookup(sid3, 'src/a.py');
+      check('a double-quoted `cd` argument with a literal `\\` names that directory, so it is a candidate',
+        bash(`cd "\\Z" && sed -i 's/x/y/' y.py`, sid3, A), 'deny');
+    }
   }
   {
     // A raw token whose first and last characters are the SAME quote
@@ -1414,10 +1446,12 @@ console.log('\nrefs-record.cjs + edit-gate.cjs — a lookup opens only the repos
     lookup(sid, 'src/a.py');
     check("a `cd` argument shaped like one single-quoted span but holding an embedded quote adds no candidate",
       bash(`cd 'a'b'c' && sed -i 's/x/y/' y.py`, sid, A), 'allow');
-    const sid2 = freshSid();
-    lookup(sid2, 'src/a.py');
-    check('a `cd` argument shaped like one double-quoted span but holding an embedded quote adds no candidate',
-      bash(`cd "a"b"c" && sed -i 's/x/y/' y.py`, sid2, A), 'allow');
+    if (POSIX_NAMES) {
+      const sid2 = freshSid();
+      lookup(sid2, 'src/a.py');
+      check('a `cd` argument shaped like one double-quoted span but holding an embedded quote adds no candidate',
+        bash(`cd "a"b"c" && sed -i 's/x/y/' y.py`, sid2, A), 'allow');
+    }
   }
   {
     // `"it's"` is one whole double-quoted span: its delimiter `"` never recurs
@@ -1582,7 +1616,10 @@ console.log('\nedit-gate.cjs — repository lookups are memoised within one hook
 // implementation still spawns once per target (there is no caching to be
 // defeated by them sharing a directory) while a memoised one collapses to a
 // small constant regardless of N.
-{
+// The git shim is a shell script, so this runs where `sh` does.
+if (process.platform === 'win32') {
+  console.log('  skip (memoisation check: the git shim is a shell script)');
+} else {
   const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   const SHIMDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'gateshim-'));
   const LOG = path.join(SHIMDIR, 'git.log');
@@ -1716,6 +1753,29 @@ check('the diff marker is cleared', fs.existsSync(diffMarker), false);
     editIn(path.join(GATED_MAIN, 'main.py'), GATED_MAIN), 'deny');
   check("this turn's own lookup still opens its own (different) repository",
     editIn(path.join(REPO, 'src/thing.py'), REPO), 'allow');
+}
+
+// =============================================================================
+console.log('\ndiscipline-reminder.cjs — /subagent-mode fast adds a dispatch rule, and only then');
+{
+  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'dr-mode-'));
+  const ctx = (env = {}) => run('discipline-reminder.cjs',
+    { hook_event_name: 'UserPromptSubmit', session_id: 'mode-test', cwd: REPO },
+    { CLAUDE_CONFIG_DIR: cfg, SHIP_LOOP_PASS: '', ...env }).out?.hookSpecificOutput?.additionalContext || '';
+  const FAST = 'reviewer-lite';
+
+  check('with no mode file, no fast-mode rule', ctx().includes(FAST), false);
+  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'quality\n');
+  check('mode "quality" adds no fast-mode rule', ctx().includes(FAST), false);
+  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'fast\n');
+  const fast = ctx();
+  check('mode "fast" names every -lite role',
+    ['reviewer-lite', 'debugger-lite', 'plan-auditor-lite', 'root-cause-auditor-lite'].every((r) => fast.includes(r)), true);
+  check('mode "fast" is ignored inside an unattended ship-loop pass',
+    ctx({ SHIP_LOOP_PASS: '1' }).includes(FAST), false);
+  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'turbo\n');
+  check('an unknown mode value adds no fast-mode rule', ctx().includes(FAST), false);
+  fs.rmSync(cfg, { recursive: true, force: true });
 }
 
 // =============================================================================

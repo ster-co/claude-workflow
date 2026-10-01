@@ -19,6 +19,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { STATE_DIR } = require('./gates/gate-lib.cjs');
+const { replaceFile } = require('./run-state.cjs');
 
 const REGISTRY_DIR = path.join(STATE_DIR, 'serena');
 
@@ -512,11 +513,12 @@ function write(key, rec) {
   // avoids that window: POSIX and Windows (Node >= 10, via MoveFileEx) both
   // make `rename` atomic when source and destination are on the same
   // filesystem, so a reader always sees either the old file complete or the
-  // new file complete, never a mix.
+  // new file complete, never a mix. Windows refuses the rename while a reader
+  // has the file open; replaceFile retries past that instead of failing.
   const tmp = path.join(REGISTRY_DIR, `.tmp.${key}.${process.pid}.${crypto.randomBytes(4).toString('hex')}`);
   try {
     fs.writeFileSync(tmp, JSON.stringify(rec));
-    fs.renameSync(tmp, recordPath(key));
+    replaceFile(tmp, recordPath(key));
   } catch (e) {
     // The name is unique to this call, so nothing else will ever remove it.
     try { fs.rmSync(tmp); } catch { /* never created, or already gone */ }
@@ -684,6 +686,95 @@ function killTree(rootPid) {
   }
 }
 
+// Windows Script Host: a JScript (ES3) program asking WMI for one process's
+// creation time and command line, printed in the format captureIdentityCim
+// prints. `cscript` is on every Windows install and answers in ~0.1-0.3 s.
+// PowerShell needs ~1-1.7 s just to start and load its CIM module (measured on
+// a Windows 11 ARM64 VM), and identity is captured on the server-start path
+// (spawn, then again once it answers), by every relay that joins a running
+// server and by every kill, so that cost lands on every session's Serena cold
+// start. WMI's CreationDate is `yyyymmddHHMMSS.ffffff+UUU`, UUU being the
+// local offset from UTC in minutes; it is converted to UTC for the same reason
+// as in captureIdentityCim.
+const IDENTITY_JS = [
+  // Any runtime error exits 1, so the caller falls back rather than reading
+  // WSH's error text as an identity.
+  "try {",
+  "var q = GetObject('winmgmts:root\\\\cimv2').ExecQuery(",
+  "  'SELECT CreationDate, CommandLine FROM Win32_Process WHERE ProcessId=' + WScript.Arguments(0));",
+  "var e = new Enumerator(q);",
+  "function pad(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }",
+  "if (!e.atEnd()) {",
+  "  var p = e.item(), c = String(p.CreationDate);",
+  "  var off = (c.charAt(21) === '-' ? -1 : 1) * Number(c.substr(22, 3));",
+  "  var d = new Date(Date.UTC(Number(c.substr(0, 4)), Number(c.substr(4, 2)) - 1, Number(c.substr(6, 2)),",
+  "    Number(c.substr(8, 2)), Number(c.substr(10, 2)), Number(c.substr(12, 2))) - off * 60000);",
+  "  WScript.Echo(pad(d.getUTCFullYear(), 4) + '-' + pad(d.getUTCMonth() + 1, 2) + '-' + pad(d.getUTCDate(), 2)",
+  "    + 'T' + pad(d.getUTCHours(), 2) + ':' + pad(d.getUTCMinutes(), 2) + ':' + pad(d.getUTCSeconds(), 2)",
+  "    + '.' + c.substr(15, 6) + '0Z ' + (p.CommandLine === null ? '' : p.CommandLine));",
+  "}",
+  "} catch (err) { WScript.Quit(1); }",
+].join('\n');
+
+// What captureIdentityCim prints for a running process: the UTC round-trip
+// time, then a space and the command line (which may be empty).
+const IDENTITY_FORMAT = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}Z( |$)/;
+const IDENTITY_JS_PATH = path.join(REGISTRY_DIR, 'process-identity.js');
+
+// Puts IDENTITY_JS on disk (cscript runs files only), once. False when it
+// cannot be written, and captureIdentityWin32 then falls back to PowerShell.
+function ensureIdentityScript() {
+  try {
+    if (fs.readFileSync(IDENTITY_JS_PATH, 'utf8') === IDENTITY_JS) return true;
+  } catch { /* missing: written below */ }
+  try {
+    ensureDir();
+    const tmp = `${IDENTITY_JS_PATH}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, IDENTITY_JS);
+    fs.renameSync(tmp, IDENTITY_JS_PATH);
+    return true;
+  } catch {
+    // A racing relay may have put the same file in place (an open cscript
+    // makes the rename fail on Windows); that is as good as writing it.
+    try { return fs.readFileSync(IDENTITY_JS_PATH, 'utf8') === IDENTITY_JS; } catch { return false; }
+  }
+}
+
+// CreationDate + CommandLine is wmic's equivalent pairing, but wmic is
+// deprecated (and absent from current Windows 11); PowerShell's Get-CimInstance
+// is the documented replacement. CreationDate is a DateTime, which default
+// formatting renders in the session's culture and local time -- the same
+// disagreement between relay and reaper that pinning LC_ALL/TZ prevents for
+// `ps` below. The round-trip format 'o' of its UTC value is culture-invariant.
+// Slow (see IDENTITY_JS): the fallback for a machine where cscript is
+// blocked or the script cannot be written.
+function captureIdentityCim(pid) {
+  const r = spawnSync('powershell', ['-NoProfile', '-Command',
+    `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; `
+    + "if ($p) { $p.CreationDate.ToUniversalTime().ToString('o') + ' ' + $p.CommandLine }"],
+  { encoding: 'utf8' });
+  return r.status === 0 ? (r.stdout || '').trim() : '';
+}
+
+function captureIdentityWin32(pid) {
+  if (ensureIdentityScript()) {
+    const r = spawnSync('cscript', ['//nologo', '//e:jscript', IDENTITY_JS_PATH, String(pid)], { encoding: 'utf8' });
+    // Status 0 with no output is a pid that is not running: nothing to fall
+    // back for. A cscript that cannot run at all (blocked by policy, or
+    // missing) is status != 0 or an error, and PowerShell answers instead;
+    // both print the same format, so an identity captured by one still
+    // matches one read by the other.
+    // cscript can also exit 0 having printed a message rather than run the
+    // script -- Windows Script Host disabled by policy does. Only empty output
+    // or the identity format is trusted: taken as an identity, that one message
+    // would stand for every process, and a record would then match whatever
+    // later reused its pid.
+    const out = (r.stdout || '').trim();
+    if (!r.error && r.status === 0 && (out === '' || IDENTITY_FORMAT.test(out))) return out;
+  }
+  return captureIdentityCim(pid);
+}
+
 /**
  * A string identifying WHICH process is running at `pid` right now, beyond
  * the pid number alone. Pids get reused -- after a reboot, or just from
@@ -711,28 +802,15 @@ function killTree(rootPid) {
  *
  * `pid` is validated here (a safe integer > 1, else RangeError) and not only
  * by killRecordServer, because this function is exported: on win32 the pid
- * is interpolated into a PowerShell `-Filter`, where a string pid is a query
+ * is interpolated into a WMI query (cscript's WQL, or PowerShell's `-Filter`
+ * on the fallback), where a string pid is a query
  * injection.
  */
 function captureIdentity(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) {
     throw new RangeError('captureIdentity requires an integer PID greater than 1');
   }
-  if (process.platform === 'win32') {
-    // CreationDate + CommandLine is wmic's equivalent pairing, but wmic is
-    // deprecated and this machine cannot exercise the win32 branch at all
-    // (house rules); PowerShell's Get-CimInstance is the documented
-    // replacement and avoids adding wmic back in for a single call site.
-    // CreationDate is a DateTime, which default formatting renders in the
-    // session's culture and local time -- the same disagreement between relay
-    // and reaper that pinning LC_ALL/TZ prevents for `ps` below. The
-    // round-trip format 'o' of its UTC value is culture-invariant.
-    const r = spawnSync('powershell', ['-NoProfile', '-Command',
-      `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; `
-      + "if ($p) { $p.CreationDate.ToUniversalTime().ToString('o') + ' ' + $p.CommandLine }"],
-    { encoding: 'utf8' });
-    return r.status === 0 ? (r.stdout || '').trim() : '';
-  }
+  if (process.platform === 'win32') return captureIdentityWin32(pid);
   const r = spawnSync('ps', ['-o', 'lstart=,command=', '-p', String(pid)], {
     encoding: 'utf8',
     env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },

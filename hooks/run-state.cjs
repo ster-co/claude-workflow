@@ -195,7 +195,7 @@ function writeJson(file, obj) {
   const tmp = path.join(tmpDir, `.${path.basename(file)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
   try {
     fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`);
-    fs.renameSync(tmp, file);
+    replaceFile(tmp, file);
   } catch (err) {
     // A failed write or rename must not leave its temp file behind for the
     // "no temp files left" check above to keep tripping over later -- clean up
@@ -204,6 +204,28 @@ function writeJson(file, obj) {
     throw err;
   }
   return obj;
+}
+
+// Renames `tmp` over `dest`. On Windows a rename onto a file another process
+// has open fails with EPERM (EACCES or EBUSY on some filesystems) instead of
+// replacing it, so a hook that merely happened to be reading `dest` at that
+// instant made the write fail and the update was lost. Readers here hold a
+// file for the length of one readFileSync, so a short bounded retry outlasts
+// them; past the bound the error surfaces as before. POSIX renames replace an
+// open file, so there it is one attempt.
+const REPLACE_RETRY_BOUND_MS = 2_000;
+function replaceFile(tmp, dest) {
+  const deadline = Date.now() + REPLACE_RETRY_BOUND_MS;
+  for (;;) {
+    try {
+      fs.renameSync(tmp, dest);
+      return;
+    } catch (err) {
+      const transient = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(err.code);
+      if (!transient || Date.now() >= deadline) throw err;
+      sleepSync(10 + Math.floor(Math.random() * 40));
+    }
+  }
 }
 
 // writeJson's temp-file-and-rename stops a write from being torn, but does
@@ -1153,4 +1175,4 @@ const load = (cwd) => resolve(cwd).state;
  */
 const runFor = (cwd, session) => resolve(cwd, null, session).state;
 
-module.exports = { load, statePath, resolve, runFor, listRuns, repoKey, tableRows, renderTable, REL };
+module.exports = { load, statePath, resolve, runFor, listRuns, repoKey, tableRows, renderTable, REL, replaceFile };

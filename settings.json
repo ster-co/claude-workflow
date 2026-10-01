@@ -8,9 +8,7 @@
   "permissions": {
     "defaultMode": "auto",
     "allow": [
-      "Bash(touch:*)",
-      "Bash(npx -y vercel@latest env add:*)",
-      "Bash(npx -y vercel@latest env rm:*)"
+      "Bash(touch:*)"
     ]
   },
   "model": "opus[1m]",

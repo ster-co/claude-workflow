@@ -146,8 +146,10 @@ approaches, carry them to Gate 1, and stop there once. `/blueprint`'s Step 2.5 a
 `/blueprint` is typed directly, with no run behind it. Do not stop twice, and do not skip
 Gate 1 on the grounds that `/blueprint` already asked.
 
-- **Do it now** — a small, obvious change: at most 3 files, about 30 changed lines, no
-  design call, a cause that reproduces, and no `Serial:`-class shared resource. Do it,
+- **Do it now** — a small, obvious change: at most 5 files and about 80 changed lines of
+  behaviour-bearing code (tests, docs and generated files do not count), no design call, no
+  change to a gate, permission or auth check, a cause that reproduces, and no
+  `Serial:`-class shared resource. Do it,
   verify it, and stop. Do **not** create a run state, do not write a plan doc, do not brief
   it. Manufacturing five briefs for a one-line fix is the most expensive failure this
   command can have. `/quick` is this same lane typed directly, without going through
