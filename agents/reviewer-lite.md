@@ -1,6 +1,6 @@
 ---
 name: reviewer-lite
-description: Adversarially reviews a completed change against its brief. Reads the diff and reruns the tests itself. Returns APPROVED or REJECTED with must-fixes. Never edits. Lower-effort twin of `reviewer` (effort medium). Dispatch it only when /subagent-mode is fast.
+description: Adversarially reviews a completed change against its brief. Reads the diff and reruns the tests itself. Returns APPROVED or REJECTED with must-fixes. Never edits. Lower-effort twin of `reviewer` (effort medium), the one a profile entry at `medium` selects.
 model: opus
 effort: medium
 tools: Read, Grep, Glob, Bash

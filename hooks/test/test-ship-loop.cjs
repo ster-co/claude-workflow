@@ -86,7 +86,7 @@ const step = steps[Math.min(idx, steps.length - 1)] || {};
 fs.writeFileSync(idxFile, String(idx + 1));
 fs.appendFileSync(path.join(stateDir, 'calls.jsonl'), JSON.stringify({
   argv: process.argv.slice(2), sessionEnv: process.env.CLAUDE_CODE_SESSION_ID,
-  shipLoopPass: process.env.SHIP_LOOP_PASS,
+  shipLoopPass: process.env.SHIP_LOOP_PASS, mcpTimeout: process.env.MCP_TIMEOUT,
 }) + '\\n');
 const cwd = process.cwd();
 
@@ -197,7 +197,7 @@ let counter = 0;
 // never the real file"). `home` is only for the regression test that proves
 // that fallback is unreachable in practice; every other case leaves the
 // child's real HOME alone since CLAUDE_CONFIG_JSON always wins first.
-function runLoop(repo, steps, { extraArgs = [], configJson = null, pauseAt = null, home = null, claudeOnPath = true } = {}) {
+function runLoop(repo, steps, { extraArgs = [], configJson = null, pauseAt = null, home = null, claudeOnPath = true, extraEnv = {} } = {}) {
   const fakeDir = mkFakeClaude();
   const stateDir = mkdtemp(path.join(os.tmpdir(), 'ship-loop-fakestate-'));
   fs.writeFileSync(path.join(stateDir, 'index'), '0');
@@ -220,6 +220,7 @@ function runLoop(repo, steps, { extraArgs = [], configJson = null, pauseAt = nul
       : minimalPathWithoutClaude(),
     FAKE_CLAUDE_STATE_DIR: stateDir,
     FAKE_CLAUDE_STEPS_FILE: stepsFile,
+    ...extraEnv,
     FAKE_CLAUDE_RUN_STATE: RUN_STATE,
     FAKE_CLAUDE_FEATURE: feature,
     CLAUDE_PLUGIN_ROOT: ROOT,
@@ -759,9 +760,30 @@ console.log('\nmodels: opus by default, --model overrides every pass, --plan-mod
   const argv = calls[0].argv;
   const i = argv.indexOf('--model');
   checkTrue('with no model flags, the pass uses --model opus', i >= 0 && argv[i + 1] === 'opus');
-  // discipline-reminder.cjs keys off this to keep /subagent-mode fast out of
-  // unattended passes, which must always dispatch the full-effort agents.
+  // hooks/agent-profile.cjs keys off this to leave an unattended pass's
+  // dispatches unrewritten, so it always runs the full-effort agents whatever
+  // profile is in force.
   check('the pass runs with SHIP_LOOP_PASS=1 in its environment', calls[0].shipLoopPass, '1');
+}
+
+{
+  // A pass starts every configured MCP server; under heavy host load Serena's
+  // relay misses Claude Code's default startup timeout, reports "failed", and
+  // the edit gate then refuses every source edit for the whole pass. The
+  // driver gives each pass a long startup timeout unless the caller set one.
+  const repo = mkRepo();
+  writeFrontDoorFixtures(repo, 'x');
+  const steps = [{ marker: { name: 'DONE', content: 'DONE: mcp timeout default\n' } }];
+  const { calls } = runLoop(repo, steps, { extraEnv: { MCP_TIMEOUT: '' } });
+  check('with MCP_TIMEOUT unset, the pass runs with MCP_TIMEOUT=300000', calls[0].mcpTimeout, '300000');
+}
+
+{
+  const repo = mkRepo();
+  writeFrontDoorFixtures(repo, 'x');
+  const steps = [{ marker: { name: 'DONE', content: 'DONE: mcp timeout explicit\n' } }];
+  const { calls } = runLoop(repo, steps, { extraEnv: { MCP_TIMEOUT: '45000' } });
+  check('an MCP_TIMEOUT the caller set is passed through unchanged', calls[0].mcpTimeout, '45000');
 }
 
 {
@@ -772,6 +794,26 @@ console.log('\nmodels: opus by default, --model overrides every pass, --plan-mod
   const argv = calls[0].argv;
   const i = argv.indexOf('--model');
   checkTrue('--model changes every pass', i >= 0 && argv[i + 1] === 'fable');
+}
+
+console.log('\nusage cap: no --max-budget-usd unless --pass-budget-usd is passed');
+
+{
+  const repo = mkRepo();
+  writeFrontDoorFixtures(repo, 'x');
+  const steps = [{ marker: { name: 'DONE', content: 'DONE: no budget flag\n' } }];
+  const { calls } = runLoop(repo, steps);
+  checkTrue('with no --pass-budget-usd, the pass has no --max-budget-usd', !calls[0].argv.includes('--max-budget-usd'));
+}
+
+{
+  const repo = mkRepo();
+  writeFrontDoorFixtures(repo, 'x');
+  const steps = [{ marker: { name: 'DONE', content: 'DONE: budget flag\n' } }];
+  const { calls } = runLoop(repo, steps, { extraArgs: ['--pass-budget-usd', '7'] });
+  const argv = calls[0].argv;
+  const i = argv.indexOf('--max-budget-usd');
+  checkTrue('--pass-budget-usd 7 passes --max-budget-usd 7', i >= 0 && argv[i + 1] === '7');
 }
 
 {

@@ -274,6 +274,7 @@ console.log('\non success, .ship-loop/feature, pass-prompt.md and the exclude li
   check('.ship-loop/pass-prompt.md has exact content (matches the exported template)',
     passPrompt, launchMod.PASS_PROMPT_TEMPLATE);
   checkTrue('the template covers "do exactly one unit"', /exactly one unit/.test(passPrompt));
+  checkTrue('the template names a parallel group as a unit', /parallel group/i.test(passPrompt));
   checkTrue('the template covers matching the commit before exiting',
     /run state and (?:the )?progress file must match the commit/.test(passPrompt));
   checkTrue('the template covers never asking the user', /[Nn]ever ask the user/.test(passPrompt));

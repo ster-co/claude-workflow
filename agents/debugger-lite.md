@@ -1,6 +1,6 @@
 ---
 name: debugger-lite
-description: Finds the root cause of a specific failure and reports it. Does not fix. Use after two rejected review rounds on the same brief, to break an implementer/reviewer ping-pong. Lower-effort twin of `debugger` (effort medium). Dispatch it only when /subagent-mode is fast.
+description: Finds the root cause of a specific failure and reports it. Does not fix. Use after two rejected review rounds on the same brief, to break an implementer/reviewer ping-pong. Lower-effort twin of `debugger` (effort medium), the one a profile entry at `medium` selects.
 model: opus
 effort: medium
 tools: Read, Grep, Glob, Bash

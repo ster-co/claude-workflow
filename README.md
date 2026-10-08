@@ -180,7 +180,7 @@ including how `/ship` runs the others and how they differ from Claude Code's own
 | `/execute` | no | The per-brief loop. Six termination conditions. `/ship` calls it. |
 | `/land` | no | Verify, commit, push, open the PR. Asks once whether to `/attack` the branch first — a "no" costs nothing. Never merges to the default branch unprompted. |
 | `/handoff` | no | Writes the next session's opening prompt. For a *deliberate* session end — the checkpoint hooks cover crashes and compaction. |
-| `/subagent-mode` | `fast`, `quality`, or nothing to show | Swaps `reviewer`, `debugger`, `plan-auditor` and `root-cause-auditor` for their `-lite` twins (same prompt and model, effort medium) until switched back. Unattended ship-loop passes always use the full agents. |
+| `/subagent-mode` | a profile (`quality`, `balanced`, `fast`), `default <profile>`, or nothing to show | Sets the agent profile for this session: a row of `hooks/agent-profiles.json` that gives the roles it lists a model and effort (the table says which). `default <profile>` sets the machine default that sessions without their own profile fall back to; no argument shows the profile in force and its source. The `agent-profile` hook enforces it by rewriting each `Agent` dispatch (effort `medium` lands on the role's `-lite` twin), so it applies from the next dispatch. An explicit `model` on a dispatch wins, and unattended ship-loop passes ignore it. |
 
 `/attack` probes a *standing system*, not a diff — that is what distinguishes it from the
 bundled `code-review` skill (`plugins/synced/<id>/engineering~g2/skills/code-review/SKILL.md`,
@@ -252,6 +252,7 @@ Rules in prose get skipped under load. These do not.
 |---|---|---|
 | `PreToolUse` Edit/Write/Bash | `gates/edit-gate.cjs` | Blocks a source edit until a **reference lookup** has run this turn — including edits made through Bash |
 | `PreToolUse` Bash | `gates/commit-gate.cjs` | Blocks `git commit` until a **`git diff`** has run this turn |
+| `PreToolUse` Bash | `gates/kill-gate.cjs` | Denies pattern kills (`pkill`/`killall` with misplaced options, a vague pattern, or a shared runtime such as `node`) and group-wide kills (`kill 0`, `kill -1`, a process group, `kill $(…)`) — macOS only |
 | `PostToolUse` Bash | `gates/diff-record.cjs` | Records that a real `git diff` ran |
 | `PostToolUse` serena refs | `gates/refs-record.cjs` | Records `find_referencing_symbols` / `find_implementations` / `find_declaration` |
 | `PostToolUse` Agent | `verify-record.cjs` | Parses `## Review Verdict` → `APPROVED`/`REJECTED`. **No parseable verdict is recorded as `UNPARSED`, never as approval** |
@@ -263,6 +264,16 @@ Rules in prose get skipped under load. These do not.
 | `UserPromptSubmit` | `discipline-reminder.cjs` | Re-injects the rules that decay by turn forty; clears the per-turn gate markers |
 
 **Escape hatch:** `SKIP_CODE_GATES=1`.
+
+**Checkout and plugin on one machine.** `settings.json` registers these hooks for the
+checkout and `hooks/hooks.json` registers the same ones for the plugin, so a machine that
+has both runs every hook twice per event with an identical payload. The gates decide the
+same thing twice, which is harmless. The two recorders that add something per delivery —
+`agent-log.cjs`'s log line and `verify-record.cjs`'s `review-round` bump — go through
+`hooks/once.cjs`, which lets one delivery per `agent_id` (or `tool_use_id`) do the work
+within a 5-second window. A machine with only one registration is unaffected. The guard
+has to be present in **both** copies: an installed plugin older than it still double
+counts until `bin/update-plugin.cjs` brings it up to date.
 
 ### What the gates actually ask for
 
@@ -495,6 +506,7 @@ node ~/.claude/hooks/test/verify-all.cjs             # everything below, plus wi
 node ~/.claude/hooks/test/test-gates.cjs             # 217 — edit gate, commit gate, markers
 node ~/.claude/hooks/test/test-verify-checkpoint.cjs # 192 — verdicts, checkpoints, run state, /ship phase
 node ~/.claude/hooks/test/test-agent-log.cjs         # 24 — subagent accounting
+node ~/.claude/hooks/test/test-once.cjs              # 23 — duplicate-delivery guard
 claude doctor                                        # install health, update channel
 ```
 

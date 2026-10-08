@@ -1,7 +1,7 @@
 {
   "name": "workflow-discipline",
   "description": "Plan-gated workflow with an orchestrator loop (/ship, /blueprint, /execute, /land), enforcement hooks for edits, commits and verification, and Serena code intelligence — the operating discipline this config exists to enforce, packaged so a colleague gets it by installing one plugin.",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "author": {
     "name": "klosoter"
   },

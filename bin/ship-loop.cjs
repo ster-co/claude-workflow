@@ -27,10 +27,6 @@ function hooksDir() {
 
 const DEFAULT_MODEL = 'opus';
 const DEFAULT_PAUSE_AT = 95;
-// Per-pass cap on Claude usage (API-price estimate; on a subscription it is usage, not billing).
-// $5 stalled heavy briefs (implement + review + fix + re-review) five times on 2026-09-28;
-// Mark approved a higher cap that day; $25 leaves ample room and still stops a runaway pass.
-const DEFAULT_PASS_BUDGET_USD = 25;
 const USAGE_STALE_MS = 30 * 60 * 1000;
 const POST_LIMIT_GRACE_MS = 2 * 60 * 1000;
 
@@ -354,13 +350,25 @@ async function runPassWithRetry({ repo, hooksD, feature, model, passBudget, ship
       '--permission-prompts', 'none',
       '--output-format', 'stream-json',
       '--verbose',
-      '--max-budget-usd', String(passBudget),
+      ...(passBudget === null ? [] : ['--max-budget-usd', String(passBudget)]),
       '--append-system-prompt-file', path.join(shipDir, 'pass-prompt.md'),
     ], {
-      // SHIP_LOOP_PASS marks the pass as unattended: discipline-reminder.cjs
-      // then leaves out the /subagent-mode fast rule, so no one is around to
-      // have chosen the lower-effort agents for it.
-      cwd: repo, encoding: 'utf-8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: uuid, SHIP_LOOP_PASS: '1' },
+      // SHIP_LOOP_PASS marks the pass as unattended: hooks/agent-profile.cjs
+      // then never rewrites its dispatches, so no profile (session or machine
+      // default) can swap in lower-effort agents that no one is around to
+      // have chosen for it.
+      // MCP_TIMEOUT: a pass starts every configured MCP server at once, and
+      // under heavy host load (many lanes, Xcode builds) Serena's relay misses
+      // Claude Code's default startup timeout. The server then shows as
+      // "failed" for the whole pass and the edit gate refuses every source
+      // edit, so the brief parks. Five minutes outlasts a loaded startup; an
+      // MCP_TIMEOUT the caller set (non-empty) is kept.
+      cwd: repo, encoding: 'utf-8', env: {
+        ...process.env,
+        CLAUDE_CODE_SESSION_ID: uuid,
+        SHIP_LOOP_PASS: '1',
+        MCP_TIMEOUT: process.env.MCP_TIMEOUT || '300000',
+      },
       maxBuffer: 100 * 1024 * 1024,
     });
     const durationMs = Date.now() - start;
@@ -443,7 +451,12 @@ async function main() {
     console.error(`--pause-at value is not a number; using default ${DEFAULT_PAUSE_AT}`);
   }
   const pauseAt = Number.isNaN(pauseAtRaw) ? DEFAULT_PAUSE_AT : pauseAtRaw;
-  const passBudget = Number(flag(argv, '--pass-budget-usd', DEFAULT_PASS_BUDGET_USD));
+  // Opt-in per-pass usage cap (API-price estimate, passed to claude as
+  // --max-budget-usd). Without the flag no cap is passed: a pass that hit the
+  // cap mid-group would end with nothing committed. The usage-limit pause
+  // (--pause-at) is what protects the account's rolling limits.
+  const passBudgetRaw = flag(argv, '--pass-budget-usd', null);
+  const passBudget = passBudgetRaw === null ? null : Number(passBudgetRaw);
   const hooksD = hooksDir();
   const sleepFn = makeSleep();
 

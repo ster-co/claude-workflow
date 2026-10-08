@@ -84,6 +84,17 @@ const trash = [];
 const repo = (...args) => { const d = tmpRepo(...args); trash.push(d); return d; };
 
 // =============================================================================
+console.log('\nrepo-setup.cjs — a repository with Swift gets the swift language server');
+{
+  // The edit gate gates .swift edits, so a repository with Swift but no swift
+  // server can never satisfy it: Serena answers "path is ignored" for every
+  // Swift symbol.
+  const r = repo({ 'App/Main.swift': 'let a = 1\n', 'server/app.ts': 'export const a = 1;\n' });
+  start(r);
+  check('swift is listed beside typescript', servers(r), ['typescript', 'swift']);
+}
+
+// =============================================================================
 console.log('\nrepo-setup.cjs — an unconfigured repository gets its language servers');
 {
   const r = repo({ 'app/main.py': 'x = 1\n', 'web/app.ts': 'export const a = 1;\n' });

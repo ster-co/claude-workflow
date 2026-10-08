@@ -1196,9 +1196,546 @@ function readStdin(cb) {
   });
 }
 
+/**
+ * shellWords(command) -> { commands: [{ words, redirs, sep }] } | { error }
+ *
+ * A character-level shell lexer (the walk of gitDirTokens, generalised) for
+ * gates that must read what the shell will actually be handed, not prose.
+ * It models POSIX-sh words as zsh/bash lex them, and nothing beyond that
+ * (no brace expansion, `${...}` with spaces, zsh glob qualifiers).
+ *
+ *  - groups and keywords: `( ... )`, `{ ...; }`, `f() { ...; }` and the reserved
+ *    words `if then elif else fi while until do done for in case esac !` at command
+ *    position start or end a command and are not words of it; the header words of
+ *    `for`/`select`/`case` and a case arm's `pat)` are dropped. A quoted keyword or
+ *    one after another word is an ordinary word. For a command ended by a group's
+ *    `)`, `sep` is the operator written after the `)`, and that command also has
+ *    `groupEnd: true` when the group held more than one command (what the operator
+ *    pipes on is then the output of the whole group, not of that command);
+ *
+ *  - one entry per simple command; `sep` is the operator that followed it
+ *    (`&&`, `||`, `;`, `&`, `|`, `|&`; a newline is `;`), null after the last;
+ *  - `words` are `{ value, subst }` with quotes and backslash escapes removed,
+ *    backslash-newline joined, `$'...'` decoded, `$"..."` read as `"..."` (bash's
+ *    reading; zsh keeps the `$`, so this only over-denies there), and a
+ *    word-initial `#` starting a comment. `subst` is true when the word holds a command substitution
+ *    (`$(...)`, backticks, unquoted `<(...)`/`>(...)`); its `value` then keeps
+ *    the RAW substitution text, not what the shell would produce;
+ *  - `redirs` are `{ op, fd, target }` (fd null when none was written) for
+ *    `N>`, `>>`, `>|`, `&>`, `&>>`, `<>`, `<`, `<<`, `<<-`, `<<<`, `>&`, `<&`.
+ *    They are attached to their command and their target is never one of its
+ *    words, so `p 2>/dev/null -x` has the words `[p, -x]`;
+ *  - the contents of every substitution the shell would run are lexed as
+ *    commands of their own and appended after the commands of the level that
+ *    held them. Process substitution is run only in an unquoted word; in
+ *    `"..."`, `'...'` and quoted-delimiter heredoc bodies nothing runs;
+ *  - a heredoc body is data (never lexed, and stripHeredocBodies is not used:
+ *    its regex misses `<<\EOF`, `<<'A-B'` and the like) except that an
+ *    unquoted-delimiter body still has its `$(...)`/backticks run. Lexing
+ *    continues with the rest of the line that opened the heredoc;
+ *  - an unterminated quote, substitution or heredoc, or a redirection with no
+ *    target, returns `{ error }`.
+ */
+class ShellLexError extends Error {}
+
+// Each swScan* takes the index just after an opening delimiter and returns the
+// index of the matching closer, or -1 when the text ends first.
+function swScanBacktick(text, i) {
+  for (; i < text.length; i++) {
+    if (text[i] === '\\') i++;
+    else if (text[i] === '`') return i;
+  }
+  return -1;
+}
+
+function swScanDquote(text, i) {
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\') i++;
+    else if (ch === '"') return i;
+    else if (ch === '$' && text[i + 1] === '(') {
+      const j = swScanSubst(text, i + 2);
+      if (j < 0) return -1;
+      i = j;
+    } else if (ch === '`') {
+      const j = swScanBacktick(text, i + 1);
+      if (j < 0) return -1;
+      i = j;
+    }
+  }
+  return -1;
+}
+
+// The delimiter word of a heredoc: `k` is the index after `<<`/`<<-`. Returns
+// { delim, quoted, end } (`end` is the index just after the word; any quoting makes
+// the body literal) or { error }.
+function swHeredocDelim(text, k) {
+  while (k < text.length && (text[k] === ' ' || text[k] === '\t')) k++;
+  let delim = '';
+  let quoted = false;
+  let any = false;
+  for (; k < text.length; k++) {
+    const c = text[k];
+    if (' \t\n;&|<>()'.includes(c)) break;
+    any = true;
+    if (c === '\\') { quoted = true; if (k + 1 < text.length) delim += text[++k]; }
+    else if (c === "'") {
+      const j = text.indexOf("'", k + 1);
+      if (j < 0) return { error: 'unterminated single quote in a heredoc delimiter' };
+      delim += text.slice(k + 1, j); k = j; quoted = true;
+    } else if (c === '"') {
+      const j = swScanDquote(text, k + 1);
+      if (j < 0) return { error: 'unterminated double quote in a heredoc delimiter' };
+      delim += text.slice(k + 1, j); k = j; quoted = true;
+    } else delim += c;
+  }
+  if (!any) return { error: 'heredoc without a delimiter' };
+  return { delim, quoted, end: k };
+}
+
+// `case`, `in` and `esac` as whole words, for the scan below.
+const SW_CASE_WORD = /(case|in|esac)(?=[\s;&|()<>]|$)/y;
+
+// The `)` closing a `$(`/`<(`/`>(` opened just before `i`. Parentheses inside
+// quotes, backticks, comments and heredoc bodies do not count, nor does the `)`
+// ending a `case` arm's pattern.
+function swScanSubst(text, i) {
+  const start = i;
+  // In `$((1<<3))` the `<<` is a shift, not a heredoc.
+  const arith = text[i] === '(';
+  const heredocs = [];  // opened on the current line; their bodies start at its newline
+  const cases = [];     // open `case`s: `wait` until its `in`, `pat` while reading a pattern
+  let depth = 1;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    const top = cases[cases.length - 1];
+    const pat = cases.length > 0 && top.pat;
+    // Nothing but whitespace since the pattern began: a `(` now is the arm's
+    // optional opening parenthesis, not a group.
+    const fresh = pat && top.fresh;
+    if (pat && !/\s/.test(ch)) top.fresh = false;
+    if (ch === '\\') i++;
+    else if (ch === "'") {
+      const j = text.indexOf("'", i + 1);
+      if (j < 0) return -1;
+      i = j;
+    } else if (ch === '"') {
+      const j = swScanDquote(text, i + 1);
+      if (j < 0) return -1;
+      i = j;
+    } else if (ch === '`') {
+      const j = swScanBacktick(text, i + 1);
+      if (j < 0) return -1;
+      i = j;
+    } else if (ch === '#' && (i === start || /[\s;&|(]/.test(text[i - 1]))) {
+      const j = text.indexOf('\n', i);
+      if (j < 0) return -1;
+      i = j - 1;
+    } else if (ch === '\n' && heredocs.length) {
+      try { i = swHeredocBodies(text, i + 1, heredocs.splice(0), null) - 1; } catch { return -1; }
+    } else if (ch === '<' && text[i + 1] === '<' && !arith) {
+      if (text[i + 2] === '<') i += 2;  // here-string
+      else {
+        const strip = text[i + 2] === '-';
+        const d = swHeredocDelim(text, i + (strip ? 3 : 2));
+        if (d.error) i++;
+        else { heredocs.push({ delim: d.delim, quoted: d.quoted, strip }); i = d.end - 1; }
+      }
+    } else if (ch === ';' && cases.length && (text[i + 1] === ';' || text[i + 1] === '&')) {
+      // `;;`, `;&` and `;;&` end an arm
+      Object.assign(top, { pat: true, fresh: true, pd: 0 });
+      if (text[i + 1] === ';' && text[i + 2] === '&') i++;
+      i++;
+    } else if (/[cie]/.test(ch) && (i === start || /[\s;&|()]/.test(text[i - 1]))
+        && (SW_CASE_WORD.lastIndex = i, SW_CASE_WORD.test(text))) {
+      const w = text.slice(i, SW_CASE_WORD.lastIndex);
+      if (w === 'case') cases.push({ wait: true, pat: false, fresh: false, pd: 0 });
+      else if (w === 'in' && top && top.wait) Object.assign(top, { wait: false, pat: true, fresh: true, pd: 0 });
+      else if (w === 'esac' && top) cases.pop();
+      i = SW_CASE_WORD.lastIndex - 1;
+    } else if (ch === '(') {
+      // In a pattern, a `(` after the first character opens a glob group (zsh
+      // `*.(a|b)`, bash extglob `@(a|b)`) that its own `)` closes.
+      if (pat) { if (!fresh) top.pd++; }
+      else depth++;
+    } else if (ch === ')') {
+      if (pat) { if (top.pd > 0) top.pd--; else top.pat = false; }
+      else if (--depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Inside backticks a backslash only escapes `\`, `` ` `` and `$`.
+const swUnbacktick = (s) => s.replace(/\\([\\`$])/g, '$1');
+
+// Decode the body of `$'...'` (`i` is just after the opening quote). Returns
+// [value, index of the closing quote] or null when unterminated.
+function swAnsiC(text, i) {
+  const SIMPLE = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r',
+    t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+  let out = '';
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (c === "'") return [out, i];
+    if (c !== '\\') { out += c; continue; }
+    const n = text[++i];
+    if (n === undefined) break;
+    if (n in SIMPLE) out += SIMPLE[n];
+    else if (/[0-7]/.test(n)) {
+      let d = n;
+      while (d.length < 3 && /[0-7]/.test(text[i + 1] || '')) d += text[++i];
+      out += String.fromCharCode(parseInt(d, 8) & 255);
+    } else if (n === 'x' || n === 'u' || n === 'U') {
+      const max = n === 'x' ? 2 : n === 'u' ? 4 : 8;
+      let d = '';
+      while (d.length < max && /[0-9a-fA-F]/.test(text[i + 1] || '')) d += text[++i];
+      const cp = d ? parseInt(d, 16) : NaN;
+      out += cp <= 0x10ffff ? String.fromCodePoint(cp) : `\\${n}${d}`;
+    } else if (n === 'c' && i + 1 < text.length) {
+      out += String.fromCharCode(text[++i].toUpperCase().charCodeAt(0) & 0x1f);
+    } else out += `\\${n}`;
+  }
+  return null;
+}
+
+// `$(...)`/backtick contents inside a heredoc body whose delimiter was unquoted.
+// A backslash escapes the next character; double quotes are not special here.
+function swBodySubsts(body) {
+  const out = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '\\') i++;
+    else if (ch === '$' && body[i + 1] === '(') {
+      const j = swScanSubst(body, i + 2);
+      if (j < 0) throw new ShellLexError('unterminated $( in a heredoc body');
+      out.push(body.slice(i + 2, j));
+      i = j;
+    } else if (ch === '`') {
+      const j = swScanBacktick(body, i + 1);
+      if (j < 0) throw new ShellLexError('unterminated backtick in a heredoc body');
+      out.push(swUnbacktick(body.slice(i + 1, j)));
+      i = j;
+    }
+  }
+  return out;
+}
+
+// Consume the bodies of the heredocs opened on the line that just ended, from
+// index `from`. Returns the index just after the last closing delimiter line. Without
+// `runSubst` the bodies are only skipped.
+function swHeredocBodies(text, from, heredocs, runSubst) {
+  let pos = from;
+  for (const h of heredocs) {
+    const bodyStart = pos;
+    let closed = false;
+    while (pos < text.length) {
+      const nl = text.indexOf('\n', pos);
+      const line = text.slice(pos, nl < 0 ? text.length : nl);
+      const lineStart = pos;
+      pos = nl < 0 ? text.length : nl + 1;
+      if ((h.strip ? line.replace(/^\t+/, '') : line) === h.delim) {
+        if (!h.quoted && runSubst) swBodySubsts(text.slice(bodyStart, lineStart)).forEach(runSubst);
+        closed = true;
+        break;
+      }
+    }
+    if (!closed) throw new ShellLexError(`unterminated heredoc (delimiter ${h.delim})`);
+  }
+  return pos;
+}
+
+// Reserved words that start or end a construct when they are the first word of a
+// command; `in` is only ever seen there after its `case` header was consumed.
+const SW_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'do', 'done',
+  'for', 'select', 'in', 'case', 'esac', '!', '{', '}']);
+const SW_EMPTY_PARENS = /\(\s*\)/y;
+
+function swLex(text) {
+  const commands = [];
+  const extra = [];
+  let words = [];
+  let redirs = [];
+  let cur = '';
+  let inWord = false;   // a word has started, even an empty one (`''`)
+  let subst = false;
+  let quoted = false;   // the word held a quote or escape, so it is not a bare fd
+  let pending = null;   // a redirection still waiting for its target word
+  const heredocs = [];
+  let groups = 0;       // open `( … )` groups
+  let litParen = 0;     // `(` kept as part of a word (`ls *(.)`) and not yet closed
+  let groupClosed = false; // the last command was ended by a group's `)`
+  let groupMulti = false;  // ... and that group held more than one command
+  const groupStarts = [];  // commands.length where each open `( … )` group began
+  let dropRest = false; // the rest of this command is a `for`/`select` header
+  let caseHdr = false;  // between `case` and its `in`
+  let armPat = false;   // reading a case arm's pattern, up to its `)`
+  let armPd = 0;        // open glob groups (`*.(a|b)`, `@(a|b)`) in that pattern
+  let armFresh = false; // nothing of the pattern read yet, so a `(` is the optional opener
+  let caseDepth = 0;    // open `case … esac`
+
+  // `$((…))` is arithmetic: its contents are lexed like any other substitution
+  // body, which for real arithmetic is a harmless nonsense command.
+  const runSubst = (body) => {
+    const inner = body.startsWith('(') && swScanSubst(body, 1) === body.length - 1
+      ? body.slice(1, -1) : body;
+    extra.push(...swLex(inner));
+  };
+  const endWord = () => {
+    if (!inWord) return;
+    if (pending) {
+      pending.target = cur;
+      if (subst) pending.subst = true;
+      pending = null;
+    } else {
+      const bare = !quoted && !subst;
+      if (armPat) {
+        // A case pattern is not a command; `esac` right after `;;` ends the case.
+        if (bare && cur === 'esac') { armPat = false; caseDepth = Math.max(0, caseDepth - 1); }
+      } else if (caseHdr) {
+        if (bare && cur === 'in') { caseHdr = false; startArm(); caseDepth++; }
+      } else if (dropRest) {
+        // the header of `for`/`select`
+      } else if (bare && words.length === 0 && SW_KEYWORDS.has(cur)) {
+        // A reserved word at command position starts (or ends) a construct; what
+        // follows it is the command. `for` and `case` also swallow their header.
+        if (cur === 'for' || cur === 'select') dropRest = true;
+        else if (cur === 'case') caseHdr = true;
+        else if (cur === 'esac') caseDepth = Math.max(0, caseDepth - 1);
+      } else words.push({ value: cur, subst });
+    }
+    cur = ''; inWord = false; subst = false; quoted = false;
+  };
+  const startArm = () => { armPat = true; armPd = 0; armFresh = true; };
+  const endCommand = (sep) => {
+    endWord();
+    if (pending) throw new ShellLexError(`redirection ${pending.op} has no target`);
+    if (words.length || redirs.length) { commands.push({ words, redirs, sep }); groupClosed = false; }
+    else if (groupClosed && sep) {
+      const last = commands[commands.length - 1];
+      last.sep = sep;
+      if (groupMulti) last.groupEnd = true;
+      groupClosed = false;
+    }
+    words = []; redirs = [];
+    dropRest = false; litParen = 0;
+  };
+  // Forget the command being read (a function definition's `name()`).
+  const discardCommand = () => {
+    words = []; redirs = []; cur = ''; inWord = false; subst = false; quoted = false;
+  };
+  // The word run inside "..." opening at text[i]; returns the closing quote's index.
+  const readDquote = (i) => {
+    const end = swScanDquote(text, i + 1);
+    if (end < 0) throw new ShellLexError('unterminated double quote');
+    inWord = quoted = true;
+    for (let k = i + 1; k < end; k++) {
+      const c = text[k];
+      if (c === '\\') {
+        const n = text[k + 1];
+        if (n === '\n') k++;
+        else if ('$`"\\'.includes(n)) { cur += n; k++; }
+        else cur += c;
+      } else if (c === '$' && text[k + 1] === '(') {
+        const j = swScanSubst(text, k + 2);
+        cur += text.slice(k, j + 1); subst = true;
+        runSubst(text.slice(k + 2, j));
+        k = j;
+      } else if (c === '`') {
+        const j = swScanBacktick(text, k + 1);
+        cur += text.slice(k, j + 1); subst = true;
+        runSubst(swUnbacktick(text.slice(k + 1, j)));
+        k = j;
+      } else cur += c;
+    }
+    return end;
+  };
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\') {
+      if (text[i + 1] === '\n') { i++; continue; }
+      inWord = quoted = true;
+      cur += i + 1 < text.length ? text[++i] : '\\';
+      continue;
+    }
+    if (ch === "'") {
+      const j = text.indexOf("'", i + 1);
+      if (j < 0) throw new ShellLexError('unterminated single quote');
+      cur += text.slice(i + 1, j);
+      inWord = quoted = true;
+      i = j;
+      continue;
+    }
+    if (ch === '"') { i = readDquote(i); continue; }
+    if (ch === '`') {
+      const j = swScanBacktick(text, i + 1);
+      if (j < 0) throw new ShellLexError('unterminated backtick');
+      cur += text.slice(i, j + 1);
+      inWord = subst = true;
+      runSubst(swUnbacktick(text.slice(i + 1, j)));
+      i = j;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === '(') {
+      const j = swScanSubst(text, i + 2);
+      if (j < 0) throw new ShellLexError('unterminated $(');
+      cur += text.slice(i, j + 1);
+      inWord = subst = true;
+      runSubst(text.slice(i + 2, j));
+      i = j;
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === "'") {
+      const r = swAnsiC(text, i + 2);
+      if (!r) throw new ShellLexError("unterminated $'");
+      cur += r[0];
+      inWord = quoted = true;
+      i = r[1];
+      continue;
+    }
+    if (ch === '$' && text[i + 1] === '"') {
+      // Locale-translated string: bash reads it as the plain "..." that follows.
+      // zsh would keep the `$`, but the gate must see what a `bash -c` body runs,
+      // and dropping the `$` under zsh only over-denies.
+      continue;
+    }
+    if ((ch === '<' || ch === '>') && text[i + 1] === '(') {
+      const j = swScanSubst(text, i + 2);
+      if (j < 0) throw new ShellLexError(`unterminated ${ch}(`);
+      cur += text.slice(i, j + 1);
+      inWord = subst = true;
+      runSubst(text.slice(i + 2, j));
+      i = j;
+      continue;
+    }
+    if (ch === '<' || ch === '>' || (ch === '&' && text[i + 1] === '>')) {
+      // A word made only of unquoted digits, directly before the operator, is
+      // its fd -- unless the previous redirection still wants that word.
+      let fd = null;
+      if (!pending && inWord && !quoted && !subst && /^\d+$/.test(cur)) {
+        fd = Number(cur); cur = ''; inWord = false;
+      } else endWord();
+      if (pending) throw new ShellLexError(`redirection ${pending.op} has no target`);
+      let op;
+      if (ch === '&') op = text.startsWith('&>>', i) ? '&>>' : '&>';
+      else if (ch === '>') {
+        op = text.startsWith('>>', i) ? '>>' : text.startsWith('>|', i) ? '>|'
+          : text.startsWith('>&', i) ? '>&' : '>';
+      } else {
+        op = text.startsWith('<<<', i) ? '<<<' : text.startsWith('<<-', i) ? '<<-'
+          : text.startsWith('<<', i) ? '<<' : text.startsWith('<&', i) ? '<&'
+            : text.startsWith('<>', i) ? '<>' : '<';
+      }
+      i += op.length - 1;
+      if (op === '<<' || op === '<<-') {
+        // The delimiter is the next word with its quoting removed; any quoting
+        // makes the body literal.
+        const d = swHeredocDelim(text, i + 1);
+        if (d.error) throw new ShellLexError(d.error);
+        i = d.end - 1;
+        const delim = d.delim;
+        redirs.push({ op, fd, target: delim });
+        heredocs.push({ delim, quoted: d.quoted, strip: op === '<<-' });
+        continue;
+      }
+      pending = { op, fd, target: null };
+      redirs.push(pending);
+      continue;
+    }
+    if (ch === '&' && text[i + 1] === '&') { endCommand('&&'); i++; continue; }
+    if (ch === '|') {
+      const op = text[i + 1] === '|' ? '||' : text[i + 1] === '&' ? '|&' : '|';
+      armFresh = false;
+      endCommand(op);
+      i += op.length - 1;
+      continue;
+    }
+    if (ch === ';') {
+      endCommand(';');
+      // `;;`, `;&` and `;;&` end a case arm; the next word is a pattern again.
+      const n = text[i + 1];
+      if (caseDepth > 0 && (n === ';' || n === '&' || n === '|')) {
+        i++;
+        if (n === ';' && text[i + 1] === '&') i++;
+        startArm();
+      }
+      continue;
+    }
+    if (ch === '(') {
+      if (armPat) {
+        // The optional opening parenthesis of a case pattern, else a glob group.
+        const opener = armFresh && !inWord;
+        armFresh = false;
+        if (!opener) { armPd++; cur += ch; inWord = true; }
+        continue;
+      }
+      if (!inWord && words.length === 0 && !pending) { groups++; groupStarts.push(commands.length); continue; }
+      // `f()` / `f ()`: a function definition; its body follows as commands.
+      SW_EMPTY_PARENS.lastIndex = i;
+      if ((inWord || words.length) && !pending && SW_EMPTY_PARENS.test(text)) {
+        discardCommand();
+        i = SW_EMPTY_PARENS.lastIndex - 1;
+        continue;
+      }
+      litParen++; cur += ch; inWord = true;
+      continue;
+    }
+    if (ch === ')') {
+      if (armPat) {
+        if (armPd > 0) { armPd--; cur += ch; inWord = true; }
+        else { endWord(); armPat = false; }
+        continue;
+      }
+      if (litParen > 0) { litParen--; cur += ch; inWord = true; continue; }
+      if (groups > 0) {
+        groups--;
+        const start = groupStarts.pop();
+        const n0 = commands.length;
+        const was = groupClosed;
+        endCommand(';');
+        groupClosed = commands.length > n0 || was;
+        groupMulti = commands.length - start > 1;
+        continue;
+      }
+      cur += ch; inWord = true;  // a stray `)` is just a character
+      continue;
+    }
+    if (ch === '&') { endCommand('&'); continue; }
+    if (ch === '\n') {
+      endCommand(';');
+      if (heredocs.length) {
+        i = swHeredocBodies(text, i + 1, heredocs, runSubst) - 1;
+        heredocs.length = 0;
+      }
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') { endWord(); continue; }
+    if (ch === '#' && !inWord) {
+      const j = text.indexOf('\n', i);
+      i = j < 0 ? text.length : j - 1;
+      continue;
+    }
+    cur += ch;
+    inWord = true;
+  }
+  endCommand(null);
+  if (heredocs.length) throw new ShellLexError(`unterminated heredoc (delimiter ${heredocs[0].delim})`);
+  return commands.concat(extra);
+}
+
+function shellWords(command) {
+  try {
+    return { commands: swLex(String(command)) };
+  } catch (e) {
+    if (e instanceof ShellLexError) return { error: e.message };
+    throw e;
+  }
+}
+
 module.exports = {
   SOURCE_EXT, CONFIG_DIR, STATE_DIR, markerPath, gatesDisabled, findGatedRoot,
   isSourceFile, bashWriteTargets, executableShell, executableShellViews, deny, readStdin, shipPhase,
   planBody, planBodyHash, acceptedIds, reportFromTranscript, promptFromTranscript,
-  SEPARATOR, tokenize, VALUE_FLAGS, gitAt, gitSubcommandIs, gitRunDirs,
+  SEPARATOR, tokenize, VALUE_FLAGS, gitAt, gitSubcommandIs, gitRunDirs, shellWords,
 };

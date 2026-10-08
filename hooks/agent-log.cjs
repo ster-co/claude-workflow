@@ -20,6 +20,7 @@
 // the first real orchestrator run then tells us the true schema instead of us
 // guessing it in advance. Tighten this once there is a run to read.
 const { runFor } = require('./run-state.cjs');
+const { claim, eventKey } = require('./once.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -64,6 +65,12 @@ process.stdin.on('end', () => {
 
   const event = input.hook_event_name;
   if (event !== 'SubagentStart' && event !== 'SubagentStop') process.exit(0);
+
+  // The checkout and an installed plugin each register this script, so one event
+  // can arrive twice. A second line would double every count built on this log,
+  // and a second start would reset the clock a stop is timed against.
+  const eventId = eventKey(input);
+  if (eventId !== null && !claim(LOG_DIR, 'agent-log', eventId)) process.exit(0);
 
   // Pair by agent_id where the platform gives one. It is the only field that
   // distinguishes two agents of the SAME role running concurrently, which is

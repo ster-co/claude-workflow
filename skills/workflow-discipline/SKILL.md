@@ -95,8 +95,9 @@ description: The default operating discipline for any non-trivial engineering ta
   A check that has never failed proves nothing. State the false conclusion a skipped
   step would produce. Inside the `/ship` pipeline this step leaves the implementer's
   loop: the implementer proves red before its change and green after, the reviewer
-  names one sabotage per test, and the orchestrator performs them once per brief.
-  Everywhere else — `/quick`, a fix in chat — there is no reviewer, so do it yourself.
+  names one sabotage per test, and the orchestrator performs them once per brief. Before
+  reporting, the implementer also checks that each branch the brief names is pinned by some
+  test (at most 3 one-line mutations, restored). Everywhere else — `/quick`, a fix in chat — there is no reviewer, so do it yourself.
 - For anything with a UI, drive a real instance of it — a static assertion about markup
   is not evidence that it works.
 - Paste the literal output — the command, its output, and the exit code. Not a summary,

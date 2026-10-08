@@ -120,7 +120,7 @@ Not to be confused with the bundled `code-review` skill: that hunts correctness 
 | `/execute [range]` | per brief: implementer → reviewer → commit → next |
 | `/land` | verify, read the diff, **offer `/attack`**, commit, push, open PR |
 | `/handoff` | write the next session's opening prompt, deliberately |
-| `/subagent-mode fast\|quality` | dispatch the `-lite` reviewer/debugger/auditors (fast) or the full ones (quality, default) |
+| `/subagent-mode <profile>` | set this session's agent profile (`quality` default, `balanced`, `fast`); `default <profile>` sets the machine default; roles per row are in `hooks/agent-profiles.json`; `fast` is experimental |
 
 `/blueprint` triages into three tracks and you do not override it: **do it now** (small and
 obvious), **iterate in a browser** (visual/taste work — a plan is the wrong artifact), or
@@ -142,7 +142,7 @@ that invalidates the prompt cache. Send the work down instead.
 | `debugger` | opus | root cause after two failed review rounds |
 | `plan-auditor` | opus | verifies a plan's claims against the repo |
 | `root-cause-auditor` | opus | attacks a diagnosis before code is written against it |
-| `…-lite` | opus, effort medium | the four roles above under `/subagent-mode fast`: same prompt, less reasoning |
+| `…-lite` | opus, effort medium | effort-medium twins of the roles above: same prompt, less reasoning; selected when a profile entry sets effort `medium` |
 
 ---
 

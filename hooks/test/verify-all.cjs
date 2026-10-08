@@ -53,9 +53,13 @@ function hookCommandPath(command) {
 const UNIT_SUITES = [
   'test-gates.cjs',
   'test-plan-gate.cjs',
+  'test-kill-gate.cjs',
+  'test-kill-probe.cjs',
+  'test-shell-words.cjs',
   'test-verify-checkpoint.cjs',
   'test-run-state-registry.cjs',
   'test-agent-log.cjs',
+  'test-once.cjs',
   'test-repo-setup.cjs',
   'test-worktree-sweep.cjs',
   'test-test-delta.cjs',
@@ -64,6 +68,7 @@ const UNIT_SUITES = [
   'test-ship-loop.cjs',
   'test-ship-loop-launch.cjs',
   'test-update-plugin.cjs',
+  'test-agent-profile.cjs',
   // Tests this file's own pool/budget/serial-exception logic, the same
   // pattern test-test-delta.cjs already uses to test test-delta.cjs.
   'test-verify-all.cjs',
@@ -812,7 +817,8 @@ console.log("== /brief's House rules template states a fast/full test-command sp
 })();
 
 // --- the -lite agents mirror their base agents ------------------------------
-// /subagent-mode fast swaps these four roles for a `-lite` twin: the same
+// A profile entry at effort `medium` (hooks/agent-profiles.json, applied by
+// hooks/agent-profile.cjs) selects one of these four roles' `-lite` twin: the same
 // prompt, model and tools at effort medium. A twin whose body drifts from its
 // base is a different reviewer wearing the same name, and nothing else would
 // notice -- so the body must stay byte-identical and the frontmatter may differ
@@ -856,9 +862,9 @@ console.log('== the -lite agents mirror their base agents ==');
 })();
 
 // --- /subagent-mode exists and is documented ---------------------------------
-// discipline-reminder.cjs reads <config>/subagent-mode; the command is the only
-// sanctioned writer, and CLAUDE.md's routing section is where a reader learns
-// the toggle exists.
+// hooks/agent-profile.cjs reads <config>/state/agent-profile/<session> and
+// <config>/subagent-mode; the command is the only sanctioned writer, and
+// CLAUDE.md's routing section is where a reader learns the toggle exists.
 console.log();
 console.log('== /subagent-mode exists and is documented ==');
 (function subagentModeCommand() {
@@ -1047,6 +1053,89 @@ console.log('== hooks.json (the plugin) matches settings.json (this repo) ==');
   }
   if (problems.length) { fail(`hooks.json has drifted from settings.json -- ${problems.join('; ')}`); return; }
   console.log(`  ok   hooks.json mirrors settings.json across ${events.length} events (same matcher+script pairs)`);
+})();
+
+// --- agent profiles: the table names real agents and the hook is wired --------
+// hooks/agent-profiles.json maps profile -> role -> {model, effort}, and
+// hooks/agent-profile.cjs turns an entry into a dispatch rewrite by choosing
+// an agent file from the effort. An entry whose effort matches no agent file
+// is skipped at runtime without a word, so the profile silently does nothing:
+// this check is what makes that loud. Efforts are read from agents/*.md here
+// too, never held as constants, so the table, the hook and the agent files
+// cannot drift apart unnoticed. The hook must also be registered in both
+// settings.json and hooks/hooks.json with a matcher covering the Agent tool;
+// a table nobody consults is as inert as a bad one.
+console.log();
+console.log('== agent profiles (table matches agents/, hook is registered) ==');
+(function agentProfiles() {
+  const fail = (msg) => { console.log(`  FAIL ${msg}`); rc = 1; return false; };
+  const MODELS = ['sonnet', 'opus', 'haiku'];
+
+  let table;
+  try {
+    table = JSON.parse(fs.readFileSync(path.join(HOOKS, 'agent-profiles.json'), 'utf8'));
+  } catch (e) {
+    fail(`could not read/parse hooks/agent-profiles.json: ${e.message}`);
+    return;
+  }
+  const agentEffort = (agent) => {
+    let text;
+    try { text = fs.readFileSync(path.join(AGENTS, `${agent}.md`), 'utf8'); } catch { return null; }
+    const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+    const m = front && /^effort:[ \t]*(\S+)[ \t]*$/m.exec(front[1]);
+    return m ? m[1] : null;
+  };
+
+  const problems = [];
+  let entries = 0;
+  for (const [profile, roles] of Object.entries(table)) {
+    if (roles === null || typeof roles !== 'object' || Array.isArray(roles)) {
+      problems.push(`${profile}: not an object of role entries`);
+      continue;
+    }
+    for (const [role, entry] of Object.entries(roles)) {
+      entries++;
+      const where = `${profile}/${role}`;
+      const baseEffort = agentEffort(role);
+      if (baseEffort === null) {
+        problems.push(`${where}: no agents/${role}.md with an effort`);
+        continue;
+      }
+      if (entry === null || typeof entry !== 'object' || !MODELS.includes(entry.model)) {
+        problems.push(`${where}: model ${JSON.stringify(entry && entry.model)} is not one of ${MODELS.join('|')}`);
+      }
+      const effort = entry && entry.effort;
+      // `medium` lands on the lite twin, so it only counts where the twin exists
+      // and itself declares medium.
+      const twinOk = effort === 'medium' && agentEffort(`${role}-lite`) === 'medium';
+      if (effort !== baseEffort && !twinOk) {
+        problems.push(`${where}: effort ${JSON.stringify(effort)} matches neither agents/${role}.md (${baseEffort}) nor a ${role}-lite twin at medium`);
+      }
+    }
+  }
+
+  // Registration: the same (matcher, script) reduction the drift check above
+  // uses, restricted to the one script.
+  const SCRIPT = 'agent-profile.cjs';
+  const wired = (hooksBlock, scriptOf) => ((hooksBlock && hooksBlock.PreToolUse) || []).some((entry) =>
+    (entry.matcher || '').split('|').includes('Agent') &&
+    (entry.hooks || []).some((hk) => path.basename(scriptOf(hk) || '') === SCRIPT));
+  if (!fs.existsSync(path.join(HOOKS, SCRIPT))) problems.push(`hooks/${SCRIPT} does not exist`);
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(ROOT, 'settings.json'), 'utf8')).hooks;
+    if (!wired(s, (hk) => hookCommandPath(hk.command || ''))) problems.push(`settings.json has no PreToolUse hook for ${SCRIPT} with an Agent matcher`);
+  } catch (e) {
+    problems.push(`could not read/parse settings.json: ${e.message}`);
+  }
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(HOOKS, 'hooks.json'), 'utf8')).hooks;
+    if (!wired(p, (hk) => (hk.args || [])[(hk.args || []).length - 1] || hk.command)) problems.push(`hooks/hooks.json has no PreToolUse hook for ${SCRIPT} with an Agent matcher`);
+  } catch (e) {
+    problems.push(`could not read/parse hooks/hooks.json: ${e.message}`);
+  }
+
+  if (problems.length) { fail(problems.join('; ')); return; }
+  console.log(`  ok   ${entries} profile entries match agents/*.md, and ${SCRIPT} is registered in settings.json and hooks.json`);
 })();
 
 // --- serena: the plugin starts the relay, project scope stays out of it -------
@@ -1300,6 +1389,154 @@ console.log('== gated repos (a .serena/project.yml is what turns the gates on) =
     } else {
       console.log(`  ${name} NOT gated — run claude-repo-setup.sh --write`);
     }
+  }
+})();
+
+// --- briefs declare dependencies; /execute groups from them -------------------
+// /execute forms a parallel group from each brief's `**Depends on:**` line. A
+// template that stops carrying the field leaves every new brief without one, so
+// every ladder silently falls back to serial. A brief file written before the
+// field existed has no such line at all; without a stated fallback /execute has
+// no rule for it, and could group briefs that were never declared independent.
+// The cap bounds how many members a red group suite pass has to localise one by
+// one. Each check prints its own line, so one missing piece cannot hide another.
+console.log();
+console.log('== briefs declare dependencies, and /execute groups from them ==');
+(function dependsOnField() {
+  const norm = (s) => s.replace(/\s+/g, ' ').trim();
+  const check = (ok, okMsg, failMsg) => {
+    if (ok) console.log(`  ok   ${okMsg}`);
+    else { console.log(`  FAIL ${failMsg}`); rc = 1; }
+  };
+  // Scoped to the fenced template block, not the whole file: the ladder
+  // paragraph names the field too, and must not stand in for the template
+  // line. The fence, not the next heading, bounds it -- the template itself
+  // opens with a `## BRIEF <n>` line.
+  const brief = fs.readFileSync(path.join(COMMANDS, 'brief.md'), 'utf8');
+  const tplStart = brief.indexOf('## Brief template');
+  const fenceOpen = tplStart === -1 ? -1 : brief.indexOf('```', tplStart);
+  const fenceClose = fenceOpen === -1 ? -1 : brief.indexOf('```', fenceOpen + 3);
+  const template = fenceClose === -1 ? '' : brief.slice(fenceOpen, fenceClose);
+  check(template.includes('**Depends on:**'),
+    "commands/brief.md's Brief template carries a **Depends on:** line",
+    "commands/brief.md's Brief template is missing the **Depends on:** line");
+
+  // Scoped to step 4, the step that decides whether a brief joins a group.
+  const exec = fs.readFileSync(path.join(COMMANDS, 'execute.md'), 'utf8');
+  const stepStart = exec.indexOf('4. **Parallel groups.**');
+  const stepEnd = stepStart === -1 ? -1 : exec.indexOf('5. **', stepStart);
+  const step = stepStart === -1 || stepEnd === -1 ? '' : norm(exec.slice(stepStart, stepEnd));
+  if (!step) {
+    check(false, '', 'commands/execute.md has no "4. **Parallel groups.**" step to check');
+    return;
+  }
+  check(step.includes(norm('no `Depends on` line')),
+    "commands/execute.md's group step states the fallback for a brief with no `Depends on` line",
+    "commands/execute.md's group step is missing the fallback for a brief with no `Depends on` line");
+  check(step.includes('at most 4'),
+    "commands/execute.md's group step caps a group at 4 members",
+    "commands/execute.md's group step is missing the group-size cap (at most 4)");
+
+  // The shape section sits above step 4 and is read first. A "serial by
+  // default" rule there contradicts step 4's grouping default, and an
+  // orchestrator trusting it runs file-disjoint independent briefs one by one.
+  check(!exec.includes('Serial by default'),
+    "commands/execute.md's shape section no longer says \"Serial by default\"",
+    'commands/execute.md still says "Serial by default", contradicting step 4 (grouping is the default)');
+})();
+
+// --- the implementer checks its brief's branches before it reports ------------
+// The implementer proves each new test red before its change and runs no
+// separate sabotage pass, so a branch the brief names that no test pins would
+// reach the reviewer, who mutates one line, sees the suite stay green, and
+// sends the brief back for a whole extra round. The branch check is bounded (at
+// most 3 one-line mutations, restored from a backup) and is reported on a
+// `Self-check:` line; the one sentence saying so is carried by every file that
+// states the pipeline's verification split. Each check prints its own line, so
+// one missing piece cannot hide another.
+//
+// These are drift guards. Each check fails when the sentence carrying a rule is
+// deleted or reworded, and each `ok` line names only the text it found. Whether
+// the surrounding prose still means what that sentence says is checked when the
+// diff is reviewed, not here.
+console.log();
+console.log('== the implementer checks the branches its brief names before it reports ==');
+(function implementerBranchCheck() {
+  const norm = (s) => s.replace(/\s+/g, ' ').trim();
+  const check = (ok, okMsg, failMsg) => {
+    if (ok) console.log(`  ok   ${okMsg}`);
+    else { console.log(`  FAIL ${failMsg}`); rc = 1; }
+  };
+  const readNorm = (...p) => norm(fs.readFileSync(path.join(ROOT, ...p), 'utf8'));
+
+  const impl = fs.readFileSync(path.join(AGENTS, 'implementer.md'), 'utf8');
+  // Step 3 is compared whole, from its number up to the next numbered step, so
+  // that no clause of it can be reworded, qualified or dropped while a
+  // fragment-level pin stays green. A deliberate edit to step 3 updates this
+  // literal in the same commit. Whitespace is collapsed on both sides because
+  // the step is hard-wrapped.
+  const pinnedStep = norm(`3. **Branch check, before you report.** For up to 3 branches the brief's \`Do\` or \`Done when\`
+   names, change one line so that the branch misbehaves, run the related tests, and confirm
+   they go red. Take a backup first with \`mktemp\`, restore with \`cp\` from it, and confirm the
+   restore with \`cmp\`. Never restore with \`git checkout -- <file>\`: it would also discard
+   your own uncommitted change to that file. A mutation that stays green means a missing
+   assertion: add the assertion, then report. Also read your diff for comments or prose that narrate history
+   (\`BRIEF n\`, "round", "used to", "before this change") and rewrite them to say what the
+   code does.`);
+  const stepStart = impl.indexOf('3. **Branch check');
+  const stepEnd = stepStart === -1 ? -1 : impl.indexOf('\n4. **', stepStart);
+  const step = stepStart === -1 || stepEnd === -1 ? '' : norm(impl.slice(stepStart, stepEnd));
+  const firstDiff = (x, y) => {
+    let i = 0;
+    while (i < x.length && i < y.length && x[i] === y[i]) i++;
+    return [x, y].map((t) => JSON.stringify(t.slice(i, i + 60)));
+  };
+  if (step === pinnedStep) {
+    check(true, "agents/implementer.md's step 3 matches the pinned text");
+  } else {
+    const [got, want] = firstDiff(step, pinnedStep);
+    check(false, '', `step 3 of agents/implementer.md differs from the pinned text; first difference, file: ${got}, pinned: ${want}`);
+  }
+
+  // The branch check runs once per round, not once per iteration of the
+  // implementer's loop, and is distinct from the reviewer's sabotage; both are
+  // stated in one sentence of the "No separate sabotage pass" paragraph,
+  // outside the step, so it is pinned there.
+  const splitSentence = 'The branch check in step 3 asks whether each branch the brief names is pinned by some test, once per round; the sabotage the reviewer names proves each test fails for its stated reason, and stays with the orchestrator.';
+  check(norm(impl).includes(norm(splitSentence)),
+    `agents/implementer.md contains "${splitSentence}"`,
+    `agents/implementer.md no longer contains "${splitSentence}" (the sentence that states: the branch check runs once per round and differs from the sabotage the reviewer names, which stays with the orchestrator)`);
+
+  // The report template is the fenced block under "## Report".
+  const repStart = impl.indexOf('## Report');
+  const fenceOpen = repStart === -1 ? -1 : impl.indexOf('```', repStart);
+  const fenceClose = fenceOpen === -1 ? -1 : impl.indexOf('```', fenceOpen + 3);
+  const template = fenceClose === -1 ? '' : impl.slice(fenceOpen, fenceClose);
+  const selfCheckLine = 'Self-check: <branch-check mutations tried, each red or green, and assertions added>';
+  check(template.split('\n').some((l) => norm(l) === norm(selfCheckLine)),
+    `agents/implementer.md's Status Report template carries the line "${selfCheckLine}"`,
+    `agents/implementer.md's Status Report template is missing the line "${selfCheckLine}"`);
+
+  check(readNorm('agents', 'implementer.md').includes('No separate sabotage pass'),
+    'agents/implementer.md contains "No separate sabotage pass"',
+    'agents/implementer.md no longer contains "No separate sabotage pass"');
+
+  // The same sentence in each file that states the verification split. For
+  // commands/brief.md it must sit in the house-rules block, not elsewhere.
+  const brief = readNorm('commands', 'brief.md');
+  const houseStart = brief.indexOf('## House rules block');
+  const houseEnd = houseStart === -1 ? -1 : brief.indexOf('## Brief template', houseStart);
+  const house = houseStart === -1 || houseEnd === -1 ? '' : brief.slice(houseStart, houseEnd);
+  const carriers = [
+    ['agents/implementer.md', readNorm('agents', 'implementer.md')],
+    ["commands/brief.md's House rules block", house],
+    ['CLAUDE.md', readNorm('CLAUDE.md')],
+    ['skills/workflow-discipline/SKILL.md', readNorm('skills', 'workflow-discipline', 'SKILL.md')],
+  ];
+  for (const [name, text] of carriers) {
+    check(text.includes('pinned by some test'),
+      `${name} contains "pinned by some test"`,
+      `${name} is missing the sentence about each named branch being pinned by some test`);
   }
 })();
 

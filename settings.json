@@ -78,11 +78,32 @@
         ]
       },
       {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/gates/kill-gate.cjs\"",
+            "timeout": 10,
+            "statusMessage": "Checking kill gate..."
+          }
+        ]
+      },
+      {
         "matcher": "Agent|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
             "command": "node \"$HOME/.claude/hooks/gate-arm.cjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/.claude/hooks/agent-profile.cjs\"",
             "timeout": 10
           }
         ]

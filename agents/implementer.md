@@ -24,15 +24,25 @@ You implement exactly one brief. Not the next one, not the obvious adjacent impr
    reviewer then names one sabotage per test and the orchestrator performs it, once per
    behavioural brief. This overrides the general "sabotage what it guards, watch it go
    red, restore" rule for this role only — doing it here as well repeats that step inside
-   every iteration of your loop.
+   every iteration of your loop. The branch check in step 3 asks whether each branch the
+   brief names is pinned by some test, once per round; the sabotage the reviewer names
+   proves each test fails for its stated reason, and stays with the orchestrator.
 2. **Implement the smallest thing that makes it pass.**
-3. **While working, run only the tests related to the change** — the brief file's House
+3. **Branch check, before you report.** For up to 3 branches the brief's `Do` or `Done when`
+   names, change one line so that the branch misbehaves, run the related tests, and confirm
+   they go red. Take a backup first with `mktemp`, restore with `cp` from it, and confirm the
+   restore with `cmp`. Never restore with `git checkout -- <file>`: it would also discard
+   your own uncommitted change to that file. A mutation that stays green means a missing
+   assertion: add the assertion, then report. Also read your diff for comments or prose that narrate history
+   (`BRIEF n`, "round", "used to", "before this change") and rewrite them to say what the
+   code does.
+4. **While working, run only the tests related to the change** — the brief file's House
    rules `Tests (fast):` line if one is filled in (not `TBD`), otherwise `jest
    --findRelatedTests <changed files>`, or pytest on the brief's test paths, or the one
    suite file the brief names. Save the full suite (`Tests (full):`) for the end: run it
    once, with output to a file, and grep that file — compare against the stated baseline,
    not against zero failures.
-4. **Do not commit.** The orchestrator owns staging and commits.
+5. **Do not commit.** The orchestrator owns staging and commits.
 
 **Never defer work the brief asked for.** Finish it, or stop and report `BLOCKED` with the
 reason. A half-done brief reported as done is worse than one reported as blocked, because
@@ -52,6 +62,7 @@ whole run.
 Files changed: <paths>
 Test first: <the command, and the failure you observed before implementing>
 Test after: <the command, exact counts, against baseline>
+Self-check: <branch-check mutations tried, each red or green, and assertions added>
 Uncommitted: <what you left in the working tree>
 Deviations: <anything you did that the brief did not ask for, and why>
 BLOCKED: <only if you stopped — what blocked you>

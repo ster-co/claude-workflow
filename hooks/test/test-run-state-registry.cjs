@@ -284,6 +284,41 @@ review('REJECTED');
 check('a second rejection reaches the escalation threshold', rounds(), 2);
 
 // =============================================================================
+console.log('\none subagent stop counts once however many registrations deliver it');
+
+// The checkout's settings.json and the installed plugin's hooks.json both
+// register verify-record.cjs, so on a machine with both the harness delivers one
+// SubagentStop to it twice. The bump above is not idempotent, so one REJECTED
+// verdict read reviewRounds = 2 and tripped /execute's debugger escalation.
+const DREPO = fs.mkdtempSync(path.join(os.tmpdir(), 'rs-dup-'));
+git(['init', '-q'], DREPO);
+const DS = 'sess-dup-0001';
+rs(['start', '--feature', 'dup-feature'], { cwd: DREPO, session: DS });
+rs(['begin-brief', '4'], { cwd: DREPO, session: DS });
+const DT = path.join(DREPO, 'transcript.jsonl');
+fs.writeFileSync(DT, [
+  { type: 'user', message: { role: 'user', content: 'Review BRIEF 4 against its acceptance criteria.' } },
+  { type: 'assistant', message: { role: 'assistant', content: [
+    { type: 'tool_use', name: 'SubagentHandback', input: { message: '## Review Verdict\nREJECTED\n' } }] } },
+].map((r) => JSON.stringify(r)).join('\n') + '\n');
+const dstop = (agentId) => spawnSync('node', [path.join(HOOKS, 'verify-record.cjs')], {
+  input: JSON.stringify({
+    session_id: DS, cwd: DREPO, hook_event_name: 'SubagentStop',
+    agent_type: 'reviewer', agent_id: agentId, agent_transcript_path: DT,
+  }),
+  encoding: 'utf-8',
+  env: { ...process.env, CLAUDE_CONFIG_DIR: CONFIG },
+});
+const dget = () => rs(['get'], { cwd: DREPO, session: DS }).json;
+
+dstop('reviewer-1');
+dstop('reviewer-1');
+check('one REJECTED stop delivered twice counts once', dget().inFlight?.['4']?.reviewRounds, 1);
+// MUST NOT swallow a real second rejection: a different agent is a new round.
+dstop('reviewer-2');
+check('a second reviewer rejecting is a second round', dget().inFlight?.['4']?.reviewRounds, 2);
+
+// =============================================================================
 console.log('\na run-state call between REJECTED verdicts must not erase the count');
 
 // verify-record.cjs writes reviewRounds directly at the top level (verify-record.cjs

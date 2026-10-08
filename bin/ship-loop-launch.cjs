@@ -37,7 +37,9 @@ const GATED_PHASES = new Set(['awaiting-direction', 'awaiting-approval']);
 const PASS_PROMPT_TEMPLATE = `# Unattended pass
 
 Do exactly one unit, then exit. A unit is one brief (implement, review, fix,
-commit and \`finish-brief\`) or one phase step (plan and audit, whole-tree
+commit and \`finish-brief\`), one parallel group of briefs as \`/execute\` step 4
+forms it (each member implemented, reviewed, fixed, committed and
+\`finish-brief\`ed separately), or one phase step (plan and audit, whole-tree
 review, merge, deploy, product check).
 
 Before exiting, the run state and the progress file must match the commit.

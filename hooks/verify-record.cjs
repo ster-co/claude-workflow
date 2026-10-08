@@ -29,6 +29,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const { reportFromTranscript, promptFromTranscript } = require('./gates/gate-lib.cjs');
+const { claim, eventKey } = require('./once.cjs');
 
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const STATE_DIR = path.join(CONFIG_DIR, 'state');
@@ -307,7 +308,13 @@ process.stdin.on('end', () => {
       let realCwd = cwd;
       try { realCwd = fs.realpathSync(cwd); } catch { /* fall back to the raw cwd */ }
       const runRes = resolveRun(realCwd, null, session);
-      if (runRes.file) {
+      // Unlike the verdict write above, which stores the same value however
+      // often it runs, the bump adds one. The checkout and an installed plugin
+      // each register this script, so one SubagentStop can arrive twice and
+      // would otherwise read as two rejections and trip the debugger escalation
+      // after one. Only one delivery of an event may bump.
+      const eventId = eventKey(input);
+      if (runRes.file && (eventId === null || claim(STATE_DIR, 'review-round', eventId))) {
         const args = [path.join(__dirname, 'run-state.cjs'), 'review-round'];
         // No first-line brief identified: bump the bare counter (which lands
         // on the run's currentBrief), matching the pre-per-brief behaviour,

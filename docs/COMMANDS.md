@@ -189,14 +189,21 @@ whether this chat is already driving a run:
 
 ---
 
-### `/subagent-mode` — trade reasoning effort for tokens on the adversarial roles
+### `/subagent-mode` — choose the agent profile: which model and effort the roles it lists run at
 
-- `fast`: `reviewer`, `debugger`, `plan-auditor` and `root-cause-auditor` are dispatched as
-  their `-lite` twins — the same prompt, model and tools at effort medium.
-- `quality` (the default, and what no setting means): the full-effort agents.
-- No argument: shows the current mode.
-- Shared by every session on this machine; unattended ship-loop passes always use the full
-  agents.
+- `quality` (the default, and what no setting means): the empty row — every agent as its own
+  file says. `balanced` and `fast` are rows of `hooks/agent-profiles.json`, which is the
+  only place that says which roles a row lists and what it sets for each.
+- `<profile>`: sets the profile for this session only; other sessions are not affected.
+- `default <profile>`: sets the machine default, which sessions without their own profile
+  fall back to. A session that already has its own profile keeps it.
+- No argument: shows the profile in force and where it came from (session, default or
+  fallback).
+- Effort `medium` selects the role's `-lite` twin (the same prompt, model and tools at
+  effort medium) for an unprefixed role.
+- An explicit `model` on a dispatch wins; unattended ship-loop passes are never rewritten.
+- `fast` is experimental: not recommended as a machine default while any of its roles is
+  unevaluated, and `default fast` warns.
 
 ---
 

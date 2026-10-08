@@ -21,7 +21,15 @@ needs a design call first, say so and route to `/blueprint` rather than inventin
 brief.
 
 If the argument is **a path to a plan or design document**, read it in full and write the whole
-ladder, in dependency order, marking which ones are independent of each other. A task is
+ladder, in dependency order, and fill every brief's `Depends on` line from the plan's own
+`Depends on` / `Independent of` lines for its tasks, translated into brief numbers. Where
+the plan states nothing for a task, list every earlier brief: an undeclared dependency runs
+serially, which is slower but never wrong. Two briefs whose red-first steps run the same
+shared suite — both add a `verify-all.cjs` check, or one adds or changes a suite that
+another's suite runner includes — depend on each other even when their owned files are
+disjoint, so the later one lists the earlier: each one's deliberately red check turns the
+other's suite run red. Cost: the ship-review-weight plan listed such a pair as independent
+and had to be corrected (plan audit finding D4). A task is
 **mechanical** when it deletes files, edits prose or config, renames or moves something
 without changing behaviour, or is a one-line change, and adds no behaviour and no test —
 anything else is **behavioural**, and if the text does not settle it, treat it as
@@ -94,7 +102,8 @@ condition, so the session needs no steering.
   exit code from `echo $?`. Not a summary, not "it passed". The implementer proves each new
   test by seeing it red before the change and green after, with no separate sabotage pass;
   the reviewer names one sabotage per test and the orchestrator performs it, once per
-  behavioural brief.
+  behavioural brief. Before reporting, the implementer also checks that each branch the
+  brief names is pinned by some test (at most 3 one-line mutations, restored).
 - Report back: what changed, the test output, the commit hash.
 - If a brief turns out not to be worth doing, say so and stop rather than manufacturing work.
 ```
@@ -104,6 +113,7 @@ condition, so the session needs no steering.
 ```markdown
 ## BRIEF <n> — <title>
 **Class:** mechanical | behavioural
+**Depends on:** <brief numbers, comma-separated | none>
 **Serial:** <optional — a shared outside resource this brief needs alone: a fixed port, a
 database or emulator, a migration, a deploy, or a browser check>
 **Do:** <one imperative paragraph>
@@ -139,9 +149,9 @@ For a single brief:
 Read <path/to/briefs.md> — the house rules, then execute BRIEF <n> exactly as written.
 ```
 
-For a ladder, hand it to `/execute` instead — it runs one brief at a time, dispatching a
-parallel group's members together where the ladder marks them independent, with a reviewer
-per brief and a commit per brief as it goes:
+For a ladder, hand it to `/execute` instead — it groups briefs whose `Depends on` is
+satisfied and whose owned files are disjoint, dispatching each group's members together and
+every other brief one at a time, with a reviewer per brief and a commit per brief as it goes:
 
 ```
 /execute <path/to/briefs.md> <first>-<last>

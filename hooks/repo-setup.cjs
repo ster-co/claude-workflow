@@ -106,7 +106,7 @@ function countExtensions(root) {
 }
 
 // Mirrors setup_repo's server-selection thresholds, with one addition: python
-// and typescript fire on any file present, csharp on any file, and yaml fires
+// and typescript fire on any file present, csharp and swift on any file, and yaml fires
 // once there are enough files to be worth a server on its own (one stray .yml
 // in a Python repo is not a reason to start one) OR when yaml is the only
 // supported language present at all, at any count — a repo that is nothing
@@ -119,12 +119,18 @@ function detectServers(root) {
   const hasPy = n('py') > 0;
   const hasTs = n('ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs') > 0;
   const hasCs = n('cs') > 0;
+  const hasSwift = n('swift') > 0;
   const yamlCount = n('yml', 'yaml');
   const servers = [];
   if (hasPy) servers.push('python');
   if (hasTs) servers.push('typescript');
-  if (yamlCount >= 10 || (!hasPy && !hasTs && !hasCs && yamlCount > 0)) servers.push('yaml');
+  if (yamlCount >= 10 || (!hasPy && !hasTs && !hasCs && !hasSwift && yamlCount > 0)) servers.push('yaml');
   if (hasCs) servers.push('csharp');
+  // swift (sourcekit-lsp, shipped with Xcode's command line tools) on any
+  // file: the edit gate gates .swift edits, and without this server Serena
+  // answers "path is ignored" for every Swift symbol, so the gate could
+  // never be satisfied in a Swift repository.
+  if (hasSwift) servers.push('swift');
   return servers;
 }
 

@@ -1,6 +1,6 @@
 ---
 name: root-cause-auditor-lite
-description: Attacks a claimed root cause before code is written against it. Given the symptom, the claimed mechanism and the evidence — and not the diagnosis that produced them — it looks for a second explanation the same evidence also fits. Read-only. Returns CONFIRMED or ALTERNATIVES. Lower-effort twin of `root-cause-auditor` (effort medium). Dispatch it only when /subagent-mode is fast.
+description: Attacks a claimed root cause before code is written against it. Given the symptom, the claimed mechanism and the evidence — and not the diagnosis that produced them — it looks for a second explanation the same evidence also fits. Read-only. Returns CONFIRMED or ALTERNATIVES. Lower-effort twin of `root-cause-auditor` (effort medium), the one a profile entry at `medium` selects.
 model: opus
 effort: medium
 tools: Read, Grep, Glob, Bash

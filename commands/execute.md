@@ -27,12 +27,15 @@ per active hour against 1.85**, wrote **9 KB of prose per session against 30 KB*
 **2 interrupts across 42 sessions against 11 across 45**. The parts that make it work are
 specific, and skipping any of them reproduces a known failure:
 
-- **Serial by default, parallel only inside a declared group.** Implement one brief → review
-  it → then dispatch the next. Cost per landed commit: 5–14 agents **66 k tokens**, 15+
-  agents **114 k**, none **210 k**. A wrong turn in brief 3 must be caught before brief 9 is
-  built on it — a parallel group is the one exception, described below, and even inside it
-  every member still gets an explicit list of the files it owns and may edit. That
-  file-ownership line is the only reason concurrent agents on one worktree never collided.
+- **Dependent work is sequenced; independent work runs together.** A brief whose
+  `Depends on` is not yet committed waits for what it builds on: implement → review → commit,
+  then dispatch the next. Cost per landed commit: 5–14 agents **66 k tokens**, 15+ agents
+  **114 k**, none **210 k**. A wrong turn in brief 3 must be caught before brief 9 is built
+  on it, which is why a dependent brief never starts early. Briefs whose `Depends on` is
+  satisfied and whose owned files are disjoint run together by default (step 4 forms the
+  group; the brief files declare dependencies, not groups). Every group member still gets an
+  explicit list of the files it owns and may edit. That file-ownership line is the only
+  reason concurrent agents on one worktree never collided.
 - **Commit after each brief.** Median commit in the best week was 599 lines. 41 % of
   edit-sessions in this corpus never committed at all.
 - **A reviewer per implementer**, not a reviewer at the end.
@@ -75,8 +78,9 @@ specific, and skipping any of them reproduces a known failure:
 1. **Read the brief file's house rules in full.** Confirm the baseline yourself before
    starting — run the test command once and check the counts match what the file claims. If
    they do not, stop and say so; do not start work against a wrong baseline.
-2. **Restate the plan back** in three lines: which briefs, in what order, which ones the file
-   marks independent, and where you expect to need judgement. Then start — do not wait for
+2. **Restate the plan back** in three lines: which briefs, in what order, which ones form
+   parallel groups by their `Depends on` lines (step 4), and where you expect to need
+   judgement. Then start — do not wait for
    approval unless the brief file demands it.
 3. **Per brief, in order:**
    - `node ~/.claude/hooks/run-state.cjs begin-brief <n>`.
@@ -337,14 +341,22 @@ specific, and skipping any of them reproduces a known failure:
      thing you commit, or on their own — they do not need to be their own step, because the
      snapshot rule above protects them either way. Then the next brief or group.
 4. **Parallel groups.** Before dispatching the next brief, check whether it can join the
-   *current* group instead of running alone. A brief joins the group when all three hold:
-   - its dependencies are already committed;
+   *current* group instead of running alone. Joining is the default, not an option: a brief
+   joins the group whenever all three hold:
+   - its dependencies are already committed. Read them from the brief's `**Depends on:**`
+     line — `none`, or the brief numbers it builds on. A brief with no `Depends on` line (a
+     brief file written before the field existed) falls back to whatever independence the
+     brief file states in prose, and where the file states none, it depends on every earlier
+     brief;
    - its **owned files are disjoint** from every other member already in the group — check
      the "Files you own" lines pairwise, not just by eye; two briefs sharing one file cannot
      share a group, however small the overlap looks;
    - it carries **no `Serial:` line** in the brief file (a `Serial:` line names a shared
      outside resource — a fixed port, a database or emulator, a migration, a deploy, or a
      browser check — and a brief that needs one runs alone).
+
+   A group has at most 4 members; a fifth eligible brief waits for the next group, because a
+   red group suite pass is localised member by member.
 
    Dispatch every member of a group in **one message, in the foreground** — never with a
    background agent, because a backgrounded agent conflicts with the Stop hook the

@@ -1,0 +1,14 @@
+{
+  "quality": {},
+  "balanced": {
+    "reviewer": { "model": "opus", "effort": "medium" },
+    "plan-auditor": { "model": "opus", "effort": "medium" },
+    "root-cause-auditor": { "model": "opus", "effort": "medium" }
+  },
+  "fast": {
+    "reviewer": { "model": "sonnet", "effort": "medium" },
+    "plan-auditor": { "model": "sonnet", "effort": "medium" },
+    "root-cause-auditor": { "model": "sonnet", "effort": "medium" },
+    "debugger": { "model": "opus", "effort": "medium" }
+  }
+}

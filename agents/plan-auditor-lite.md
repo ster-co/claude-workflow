@@ -1,6 +1,6 @@
 ---
 name: plan-auditor-lite
-description: Audits a plan document for false, uncited, and stale-premise claims before it is approved. Verifies load-bearing claims -- the ones a task, a decision's reason, or a Done when rests on -- against the repository itself; a claim nothing rests on is out of scope. Read-only, never edits. Returns CLEAN or DEFECTS. Lower-effort twin of `plan-auditor` (effort medium). Dispatch it only when /subagent-mode is fast.
+description: Audits a plan document for false, uncited, and stale-premise claims before it is approved. Verifies load-bearing claims -- the ones a task, a decision's reason, or a Done when rests on -- against the repository itself; a claim nothing rests on is out of scope. Read-only, never edits. Returns CLEAN or DEFECTS. Lower-effort twin of `plan-auditor` (effort medium), the one a profile entry at `medium` selects.
 model: opus
 effort: medium
 tools: Read, Grep, Glob, Bash

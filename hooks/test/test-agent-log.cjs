@@ -42,7 +42,12 @@ const lines = () => {
     return fs.readFileSync(LOG, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   } catch { return []; }
 };
-const reset = () => { try { fs.rmSync(LOG); } catch {} };
+// Also forgets the duplicate-delivery claims: later sections resend identical
+// payloads on purpose, and each of those is meant to be a new event.
+const reset = () => {
+  try { fs.rmSync(LOG); } catch {}
+  try { fs.rmSync(path.join(SANDBOX, 'once'), { recursive: true, force: true }); } catch {}
+};
 
 const start = (over = {}) => ({
   hook_event_name: 'SubagentStart',
@@ -109,6 +114,38 @@ L = lines();
 check('an unmatched stop is still logged', L.length, 1);
 check('an unmatched stop is marked unpaired', L[0]?.paired, false);
 check('an unmatched stop reports no duration', L[0]?.ms, null);
+
+// =============================================================================
+console.log('\nagent-log.cjs — one event delivered by two hook registrations is logged once');
+// The checkout's settings.json and the installed plugin's hooks.json both
+// register this script, so on a machine with both the harness runs it twice per
+// event with an identical payload. Measured in state/agent-log.jsonl: every
+// start and stop for an agent appeared twice, one millisecond apart.
+reset();
+run(start({ agent_id: 'dup-1' }));
+run(start({ agent_id: 'dup-1' }));
+check('a start delivered twice is logged once', lines().filter((r) => r.event === 'start').length, 1);
+run(stop({ agent_id: 'dup-1' }));
+run(stop({ agent_id: 'dup-1' }));
+L = lines();
+check('a stop delivered twice is logged once', L.filter((r) => r.event === 'stop').length, 1);
+check('and that stop is the one paired with the start', L.find((r) => r.event === 'stop')?.paired, true);
+
+// MUST NOT collapse distinct events: another agent, and the same agent's start
+// versus its stop, are not duplicates of one another.
+reset();
+run(start({ agent_id: 'x1' }));
+run(start({ agent_id: 'x2' }));
+run(stop({ agent_id: 'x1' }));
+run(stop({ agent_id: 'x2' }));
+check('two agents are two starts and two stops', lines().length, 4);
+
+// MUST NOT drop an event that carries no agent_id: without an identity there is
+// nothing to tell a duplicate from a second dispatch.
+reset();
+run(start({ agent_id: undefined }));
+run(start({ agent_id: undefined }));
+check('events with no agent_id are all logged', lines().length, 2);
 
 // =============================================================================
 console.log('\nagent-log.cjs — carries the brief in flight');

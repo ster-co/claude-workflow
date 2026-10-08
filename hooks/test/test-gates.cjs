@@ -1756,25 +1756,26 @@ check('the diff marker is cleared', fs.existsSync(diffMarker), false);
 }
 
 // =============================================================================
-console.log('\ndiscipline-reminder.cjs — /subagent-mode fast adds a dispatch rule, and only then');
+console.log('\ndiscipline-reminder.cjs — the subagent profile is enforced by hooks/agent-profile.cjs, not by a prompt rule');
 {
+  // The dispatch rewrite lives in the PreToolUse hook, so the per-turn reminder must carry
+  // no subagent-mode rule whatever the machine default or the per-session file says.
   const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'dr-mode-'));
   const ctx = (env = {}) => run('discipline-reminder.cjs',
     { hook_event_name: 'UserPromptSubmit', session_id: 'mode-test', cwd: REPO },
     { CLAUDE_CONFIG_DIR: cfg, SHIP_LOOP_PASS: '', ...env }).out?.hookSpecificOutput?.additionalContext || '';
-  const FAST = 'reviewer-lite';
+  const carriesRule = (text) => /-lite|subagent mode/i.test(text);
 
-  check('with no mode file, no fast-mode rule', ctx().includes(FAST), false);
-  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'quality\n');
-  check('mode "quality" adds no fast-mode rule', ctx().includes(FAST), false);
-  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'fast\n');
-  const fast = ctx();
-  check('mode "fast" names every -lite role',
-    ['reviewer-lite', 'debugger-lite', 'plan-auditor-lite', 'root-cause-auditor-lite'].every((r) => fast.includes(r)), true);
-  check('mode "fast" is ignored inside an unattended ship-loop pass',
-    ctx({ SHIP_LOOP_PASS: '1' }).includes(FAST), false);
-  fs.writeFileSync(path.join(cfg, 'subagent-mode'), 'turbo\n');
-  check('an unknown mode value adds no fast-mode rule', ctx().includes(FAST), false);
+  check('with no mode file, no subagent rule', carriesRule(ctx()), false);
+  for (const mode of ['quality', 'balanced', 'fast', 'turbo']) {
+    fs.writeFileSync(path.join(cfg, 'subagent-mode'), `${mode}\n`);
+    check(`machine default "${mode}" adds no subagent rule`, carriesRule(ctx()), false);
+  }
+  fs.mkdirSync(path.join(cfg, 'state', 'agent-profile'), { recursive: true });
+  fs.writeFileSync(path.join(cfg, 'state', 'agent-profile', 'mode-test'), 'fast\n');
+  check('a per-session "fast" adds no subagent rule', carriesRule(ctx()), false);
+  check('the reminder still lists its standing rules',
+    ctx().startsWith('Standing rules for this turn:'), true);
   fs.rmSync(cfg, { recursive: true, force: true });
 }
 
